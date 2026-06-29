@@ -21,3 +21,9 @@
 
 - 新增 `HR-Project` 可攜帶資料夾，放入 `index.html`、`app.js`、`styles.css` 與 `vendor/xlsx.full.min.js`。
 - 補充需求文件：公司或家裡使用時可直接開啟 `HR-Project/index.html`；`127.0.0.1:8765` 需在該台電腦有啟動本機服務時才可用。
+
+## 2026-06-29 v0.4
+
+- 使用者確認改採單一路徑維護：`HR-Project` 作為唯一正式程式資料夾。
+- 補充 AGENTS.md 與 requirement.md：後續前端需求修改均直接以 `HR-Project` 內檔案為準。
+- 外層入口改為導向 `HR-Project/index.html`，避免外層與正式程式資料夾雙軌混淆。
