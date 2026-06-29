@@ -337,6 +337,25 @@ select:disabled {
   white-space: nowrap;
 }
 
+.risk-preview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.mini-risk {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 11px;
+  font-weight: 700;
+}
+
 .detail-body {
   padding: 16px;
 }
@@ -370,6 +389,11 @@ select:disabled {
   gap: 6px;
 }
 
+.timeline-text {
+  line-height: 1.5;
+  word-break: break-word;
+}
+
 .record-list {
   display: grid;
   gap: 10px;
@@ -392,6 +416,10 @@ select:disabled {
   color: var(--muted);
   font-size: 13px;
   line-height: 1.45;
+}
+
+.record-risk-detail {
+  color: var(--danger) !important;
 }
 
 .risk-section {

@@ -8,6 +8,7 @@
 *.jpeg
 *.png
 *.pdf
+*.rar
 ~$*
 .DS_Store
 Thumbs.db
