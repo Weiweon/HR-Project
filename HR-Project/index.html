@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>異常工時月曆稽核</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">HR 工時稽核</p>
+        <h1>異常工時月曆稽核</h1>
+      </div>
+      <div class="status-pill" id="privacyStatus">本機處理</div>
+    </header>
+
+    <main>
+      <section class="toolbar" aria-label="資料匯入與篩選">
+        <label class="file-picker">
+          <input id="fileInput" type="file" accept=".xlsx,.xls">
+          <span>匯入 Excel</span>
+        </label>
+
+        <div class="field">
+          <label for="monthSelect">月份</label>
+          <select id="monthSelect" disabled>
+            <option>尚未匯入</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="personSelect">人員</label>
+          <select id="personSelect" disabled>
+            <option>全部</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="riskSelect">異常</label>
+          <select id="riskSelect" disabled>
+            <option value="all">全部</option>
+          </select>
+        </div>
+
+        <button id="exportSummaryBtn" class="ghost-button" type="button" disabled>匯出摘要</button>
+        <button id="exportDetailBtn" class="ghost-button" type="button" disabled>匯出明細</button>
+      </section>
+
+      <section class="notice" id="fileStatus">
+        尚未匯入資料。請選擇公司系統匯出的 Excel 檔。
+      </section>
+
+      <section class="summary-grid" aria-label="管理摘要">
+        <div class="metric">
+          <span>加班時數</span>
+          <strong id="metricHours">0</strong>
+        </div>
+        <div class="metric">
+          <span>估算加班費</span>
+          <strong id="metricPay">$0</strong>
+        </div>
+        <div class="metric risk">
+          <span>異常天數</span>
+          <strong id="metricRiskDays">0</strong>
+        </div>
+        <div class="metric">
+          <span>月累計</span>
+          <strong id="metricMonthRisk">0</strong>
+        </div>
+      </section>
+
+      <section class="content-layout">
+        <section class="calendar-panel" aria-label="月曆">
+          <div class="panel-heading">
+            <div>
+              <h2 id="calendarTitle">月曆</h2>
+              <p id="calendarSubtitle">匯入後顯示月份資料</p>
+            </div>
+          </div>
+          <div class="weekday-row" aria-hidden="true">
+            <span>日</span><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span>
+          </div>
+          <div id="calendarGrid" class="calendar-grid"></div>
+        </section>
+
+        <aside class="detail-panel" aria-label="日期明細">
+          <div class="panel-heading">
+            <div>
+              <h2 id="detailTitle">明細</h2>
+              <p id="detailSubtitle">選取日期查看稽核內容</p>
+            </div>
+          </div>
+          <div id="detailBody" class="detail-body empty-state">
+            尚無日期資料。
+          </div>
+        </aside>
+      </section>
+
+      <section class="risk-section" aria-label="異常清單">
+        <div class="panel-heading">
+          <div>
+            <h2>異常清單</h2>
+            <p id="riskSubtitle">匯入後列出需覆核項目</p>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>日期</th>
+                <th>人員</th>
+                <th>班別</th>
+                <th>加班</th>
+                <th>估算金額</th>
+                <th>稽核重點</th>
+              </tr>
+            </thead>
+            <tbody id="riskTableBody">
+              <tr><td colspan="6" class="table-empty">尚無資料</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="vendor/xlsx.full.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
