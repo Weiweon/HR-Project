@@ -1,0 +1,13 @@
+*.xlsx
+*.xls
+*.xlsm
+*.csv
+*.docx
+*.pptx
+*.jpg
+*.jpeg
+*.png
+*.pdf
+~$*
+.DS_Store
+Thumbs.db
