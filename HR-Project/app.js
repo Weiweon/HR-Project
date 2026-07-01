@@ -5,31 +5,46 @@ const dom = {};
 const TOLERANCE_MINUTES = 10;
 const ENTRY_LOOKBACK_HOURS = 18;
 const EXIT_LOOKAHEAD_HOURS = 18;
+const ATTENDANCE_SOURCE_PRIORITY = ["car", "schedule", "application"];
+const CAR_AUDIT_CUTOFF_DATEKEY = "2026-05-20";
 
-const RISK = {
-  EARLY_LEAVE: "提早離院",
-  LATE_OVERTIME: "晚於加班",
-  MISSING_SIGN_IN: "簽到無紀錄",
-  MISSING_SIGN_OUT: "簽退無紀錄",
+const ATTENDANCE_STATUS = {
+  NORMAL: { short: "正常", long: "正常" },
+  EARLY_LEAVE: { short: "提早離院", long: "提早離院" },
+  LATE_OVERTIME: { short: "晚於加班", long: "簽到晚於加班申請" },
+  MISSING_SIGN_IN: { short: "簽到無紀錄", long: "簽到無紀錄" },
+  MISSING_SIGN_OUT: { short: "簽退無紀錄", long: "簽退無紀錄" },
+  PENDING_REVIEW: { short: "待覆核", long: "差勤待覆核" },
+};
+
+const WORK_RISK = {
   HOLIDAY_WORK: "例假日出勤",
-  OVER_12_HOURS: "12小時以上",
+  OVER_12_HOURS: "日總工時12小時以上",
   REST_LESS_11: "間隔未達11小時",
-  OVER_46_HOURS: "46小時以上",
+  OVER_46_HOURS: "月延展工時46小時以上",
   PENDING_REVIEW: "差勤待覆核",
 };
 
 const riskOptions = [
   ["all", "全部"],
   ["hasRisk", "僅看異常"],
-  [RISK.EARLY_LEAVE, RISK.EARLY_LEAVE],
-  [RISK.LATE_OVERTIME, RISK.LATE_OVERTIME],
-  [RISK.MISSING_SIGN_IN, RISK.MISSING_SIGN_IN],
-  [RISK.MISSING_SIGN_OUT, RISK.MISSING_SIGN_OUT],
-  [RISK.HOLIDAY_WORK, RISK.HOLIDAY_WORK],
-  [RISK.OVER_12_HOURS, RISK.OVER_12_HOURS],
-  [RISK.REST_LESS_11, RISK.REST_LESS_11],
-  [RISK.OVER_46_HOURS, RISK.OVER_46_HOURS],
+  [ATTENDANCE_STATUS.EARLY_LEAVE.short, ATTENDANCE_STATUS.EARLY_LEAVE.short],
+  [ATTENDANCE_STATUS.LATE_OVERTIME.short, ATTENDANCE_STATUS.LATE_OVERTIME.short],
+  [ATTENDANCE_STATUS.MISSING_SIGN_IN.short, ATTENDANCE_STATUS.MISSING_SIGN_IN.short],
+  [ATTENDANCE_STATUS.MISSING_SIGN_OUT.short, ATTENDANCE_STATUS.MISSING_SIGN_OUT.short],
+  [WORK_RISK.HOLIDAY_WORK, WORK_RISK.HOLIDAY_WORK],
+  [WORK_RISK.OVER_12_HOURS, WORK_RISK.OVER_12_HOURS],
+  [WORK_RISK.REST_LESS_11, WORK_RISK.REST_LESS_11],
+  [WORK_RISK.OVER_46_HOURS, WORK_RISK.OVER_46_HOURS],
 ];
+
+const DAY_TYPE = {
+  WORKDAY: "平日",
+  RESTDAY: "休息日",
+  HOLIDAY: "例假日",
+  FIXED_HOLIDAY: "固定假日",
+  SPECIAL: "天災選舉日",
+};
 
 const state = {
   workbookName: "",
@@ -130,7 +145,9 @@ function loadWorkbook(workbook, fileName) {
   state.workbookName = fileName;
   state.scheduleRows = parseScheduleSheet(workbook.Sheets[scheduleSheetName]);
   state.wageRows = wageSheetName ? parseWageSheet(workbook.Sheets[wageSheetName]) : [];
-  state.applicationRows = parseApplicationSheets(workbook, new Set([scheduleSheetName, wageSheetName, carSheetName].filter(Boolean)));
+  state.applicationRows = dedupeApplicationRows(
+    parseApplicationSheets(workbook, new Set([scheduleSheetName, wageSheetName, carSheetName].filter(Boolean))),
+  );
   state.carRows = carSheetName ? parseCarSheet(workbook.Sheets[carSheetName]) : [];
   assignCarPeople(state.carRows, state.scheduleRows, state.applicationRows);
 
@@ -139,10 +156,10 @@ function loadWorkbook(workbook, fileName) {
   render();
 
   const modeText = state.dataSourceMode === "application"
-    ? "已依加班單申請建立區間並稽核出勤異常。"
+    ? "已依加班單申請重算額外加班費並重整月曆稽核。"
     : "未讀到加班單申請，先以排班加班時數提供待覆核版本。";
   setStatus(
-    `已匯入 ${fileName}。排班 ${state.scheduleRows.length} 筆、加班單 ${state.applicationRows.length} 筆、汽車進出 ${state.carRows.length} 筆、時薪 ${state.wageRows.length} 筆。${modeText}`,
+    `已匯入 ${fileName}。排班 ${state.scheduleRows.length} 筆、有效加班單 ${state.applicationRows.length} 筆、汽車進出 ${state.carRows.length} 筆、時薪 ${state.wageRows.length} 筆。${modeText}`,
     state.dataSourceMode !== "application",
   );
 }
@@ -272,8 +289,6 @@ function parseApplicationSheets(workbook, ignoredSheets) {
 
       const signInRaw = indexes.signIn >= 0 ? row[indexes.signIn] : "";
       const signOutRaw = indexes.signOut >= 0 ? row[indexes.signOut] : "";
-      const signInSeries = parseSeriesDateTimes(date, signInRaw);
-      const signOutSeries = parseSeriesDateTimes(date, signOutRaw);
 
       applications.push({
         sourceSheet: sheetName,
@@ -297,8 +312,8 @@ function parseApplicationSheets(workbook, ignoredSheets) {
         normalAttendanceText: cleanText(row[indexes.normalAttendance]),
         signInRaw: cleanText(signInRaw),
         signOutRaw: cleanText(signOutRaw),
-        signIns: signInSeries,
-        signOuts: signOutSeries.map((value) => normalizeEndTime(start || date, value)),
+        signIns: parseSeriesDateTimes(date, signInRaw),
+        signOuts: parseSeriesDateTimes(date, signOutRaw).map((value) => normalizeEndTime(start || date, value)),
         carInRaw: cleanText(row[indexes.carIn]),
         carOutRaw: cleanText(row[indexes.carOut]),
         helperCarIns: parseSeriesDateTimes(date, row[indexes.carIn]),
@@ -322,10 +337,6 @@ function combineApplicationHeaders(primaryRow, secondaryRow) {
 }
 
 function getApplicationIndexes(headerRow) {
-  const headerMap = new Map(
-    headerRow.map((value, index) => [normalizeHeader(value), { index, value: cleanText(value) }]),
-  );
-
   const findHeaderIndex = (...labels) => headerRow.findIndex((value) => labels.includes(normalizeHeader(value)));
 
   const startLabels = headerRow
@@ -362,7 +373,6 @@ function getApplicationIndexes(headerRow) {
     endNormalized: endLabels[1]?.index ?? endLabels[0]?.index ?? -1,
     carIn: findHeaderIndex("進"),
     carOut: findHeaderIndex("出"),
-    headerMap,
   };
 }
 
@@ -392,6 +402,48 @@ function parseCarSheet(sheet) {
     .filter((row) => row && row.direction);
 }
 
+function dedupeApplicationRows(rows) {
+  const map = new Map();
+
+  rows.forEach((row) => {
+    const key = [
+      row.person,
+      row.dateKey,
+      row.shift,
+      row.reason,
+      row.start ? row.start.getTime() : row.startRaw,
+      row.end ? row.end.getTime() : row.endRaw,
+    ].join("|");
+
+    if (!map.has(key)) {
+      map.set(key, {
+        ...row,
+        sourceRows: [row.sourceRow],
+        duplicateCount: 1,
+      });
+      return;
+    }
+
+    const existing = map.get(key);
+    existing.duplicateCount += 1;
+    existing.sourceRows.push(row.sourceRow);
+    existing.hours = Math.max(existing.hours, row.hours);
+    existing.hourly = existing.hourly || row.hourly;
+    existing.amount = existing.amount || row.amount;
+    existing.signIns = mergeDateArrays(existing.signIns, row.signIns);
+    existing.signOuts = mergeDateArrays(existing.signOuts, row.signOuts);
+    existing.helperCarIns = mergeDateArrays(existing.helperCarIns, row.helperCarIns);
+    existing.helperCarOuts = mergeDateArrays(existing.helperCarOuts, row.helperCarOuts);
+    existing.signInRaw = existing.signInRaw || row.signInRaw;
+    existing.signOutRaw = existing.signOutRaw || row.signOutRaw;
+    existing.carInRaw = existing.carInRaw || row.carInRaw;
+    existing.carOutRaw = existing.carOutRaw || row.carOutRaw;
+    existing.audit = existing.audit || row.audit;
+  });
+
+  return Array.from(map.values()).sort((a, b) => a.person.localeCompare(b.person, "zh-Hant") || a.date - b.date);
+}
+
 function assignCarPeople(carRows, scheduleRows, applicationRows) {
   const people = unique([
     ...scheduleRows.map((row) => row.person),
@@ -417,6 +469,8 @@ function buildAnalysis() {
       const daily = dailyMap.get(key);
       daily.scheduleRows.push(row);
       daily.scheduledHours += row.scheduledHours || row.dailyWorkHours || 0;
+      daily.signIn = earliestTime([daily.signIn, row.signIn, ...row.otherSignIns]);
+      daily.signOut = latestTime([daily.signOut, row.signOut, ...row.otherSignOuts]);
     }
   });
 
@@ -426,9 +480,7 @@ function buildAnalysis() {
   state.dataSourceMode = useApplications ? "application" : "schedule";
   const records = useApplications
     ? state.applicationRows.map((app) => recordFromApplication(app, scheduleByKey, wageMap, state.attendanceIndex))
-    : state.scheduleRows
-      .filter((row) => row.overtimeHours > 0)
-      .map((row) => recordFromSchedule(row, wageMap));
+    : state.scheduleRows.filter((row) => row.overtimeHours > 0).map((row) => recordFromSchedule(row, wageMap));
 
   records.forEach((record) => {
     if (!record) return;
@@ -445,7 +497,7 @@ function buildAnalysis() {
   attachDailyAttendance(dailyMap, state.attendanceIndex);
   applyScheduleRisks(dailyMap);
   applyMonthlyOvertimeRisk(records, dailyMap);
-  finalizeDailyRisks(dailyMap);
+  finalizeDailyRows(dailyMap);
 
   state.overtimeRecords = records;
   state.dailyRows = Array.from(dailyMap.values()).sort((a, b) => a.date - b.date || a.person.localeCompare(b.person, "zh-Hant"));
@@ -458,10 +510,21 @@ function buildAnalysis() {
   state.selectedDateKey = "";
 }
 
+function buildWageMap(rows) {
+  const map = new Map();
+  rows.forEach((row) => {
+    if (row.hourly > 0) {
+      map.set(`${row.person}|${row.month}`, row.hourly);
+      if (!map.has(`*|${row.month}`)) map.set(`*|${row.month}`, row.hourly);
+    }
+  });
+  return map;
+}
+
 function buildAttendanceIndex(scheduleRows, applicationRows, carRows) {
   const index = new Map();
 
-  const pushEvent = (person, time, direction, sourceLabel, isClockRecord, note = "") => {
+  const pushEvent = (person, time, direction, sourceLabel, isClockRecord, note = "", sourceGroup = "", auditChannel = "clock") => {
     if (!person || !time || !direction) return;
     if (!index.has(person)) index.set(person, []);
     index.get(person).push({
@@ -471,25 +534,27 @@ function buildAttendanceIndex(scheduleRows, applicationRows, carRows) {
       sourceLabel,
       isClockRecord,
       note,
+      sourceGroup,
+      auditChannel,
     });
   };
 
   scheduleRows.forEach((row) => {
-    pushEvent(row.person, row.signIn, "entry", "排班簽到", true, row.signInRaw);
-    pushEvent(row.person, row.signOut, "exit", "排班簽退", true, row.signOutRaw);
-    row.otherSignIns.forEach((time) => pushEvent(row.person, time, "entry", "排班其他簽到", true, row.otherSignInRaw));
-    row.otherSignOuts.forEach((time) => pushEvent(row.person, time, "exit", "排班其他簽退", true, row.otherSignOutRaw));
+    pushEvent(row.person, row.signIn, "entry", "排班簽到", true, row.signInRaw, "schedule", "clock");
+    pushEvent(row.person, row.signOut, "exit", "排班簽退", true, row.signOutRaw, "schedule", "clock");
+    row.otherSignIns.forEach((time) => pushEvent(row.person, time, "entry", "排班其他簽到", true, row.otherSignInRaw, "schedule", "clock"));
+    row.otherSignOuts.forEach((time) => pushEvent(row.person, time, "exit", "排班其他簽退", true, row.otherSignOutRaw, "schedule", "clock"));
   });
 
   applicationRows.forEach((row) => {
-    row.signIns.forEach((time) => pushEvent(row.person, time, "entry", "加班單簽到", true, row.signInRaw));
-    row.signOuts.forEach((time) => pushEvent(row.person, time, "exit", "加班單簽退", true, row.signOutRaw));
-    row.helperCarIns.forEach((time) => pushEvent(row.person, time, "entry", "加班單汽車進場", false, row.carInRaw));
-    row.helperCarOuts.forEach((time) => pushEvent(row.person, time, "exit", "加班單汽車離場", false, row.carOutRaw));
+    row.signIns.forEach((time) => pushEvent(row.person, time, "entry", "加班單簽到", true, row.signInRaw, "application", "clock"));
+    row.signOuts.forEach((time) => pushEvent(row.person, time, "exit", "加班單簽退", true, row.signOutRaw, "application", "clock"));
+    row.helperCarIns.forEach((time) => pushEvent(row.person, time, "entry", "加班單汽車進場", false, row.carInRaw, "application", "car-helper"));
+    row.helperCarOuts.forEach((time) => pushEvent(row.person, time, "exit", "加班單汽車離場", false, row.carOutRaw, "application", "car-helper"));
   });
 
   carRows.forEach((row) => {
-    pushEvent(row.person, row.time, row.direction, row.sourceLabel, false, row.rawText);
+    pushEvent(row.person, row.time, row.direction, row.sourceLabel, false, row.rawText, "car", "car");
   });
 
   index.forEach((events, person) => {
@@ -501,17 +566,6 @@ function buildAttendanceIndex(scheduleRows, applicationRows, carRows) {
   });
 
   return index;
-}
-
-function buildWageMap(rows) {
-  const map = new Map();
-  rows.forEach((row) => {
-    if (row.hourly > 0) {
-      map.set(`${row.person}|${row.month}`, row.hourly);
-      if (!map.has(`*|${row.month}`)) map.set(`*|${row.month}`, row.hourly);
-    }
-  });
-  return map;
 }
 
 function createDaily(row) {
@@ -530,13 +584,19 @@ function createDaily(row) {
     signOutRaw: row.signOutRaw,
     expectedInRaw: row.expectedInRaw,
     expectedOutRaw: row.expectedOutRaw,
-    signIn: row.signIn,
-    signOut: row.signOut,
+    signIn: earliestTime([row.signIn, ...row.otherSignIns]),
+    signOut: latestTime([row.signOut, ...row.otherSignOuts]),
     department: row.department,
     title: row.title,
     scheduleRows: [row],
     overtimeRecords: [],
     attendanceEvents: [],
+    attendanceStatuses: [],
+    attendanceDetails: [],
+    attendanceCalendarLines: [],
+    workRisks: [],
+    workRiskDetails: [],
+    calendarNotes: [],
     risks: [],
     riskDetails: [],
   };
@@ -565,6 +625,12 @@ function createDailyFromRecord(record) {
     scheduleRows: [],
     overtimeRecords: [],
     attendanceEvents: [],
+    attendanceStatuses: [],
+    attendanceDetails: [],
+    attendanceCalendarLines: [],
+    workRisks: [],
+    workRiskDetails: [],
+    calendarNotes: [],
     risks: [],
     riskDetails: [],
   };
@@ -573,59 +639,67 @@ function createDailyFromRecord(record) {
 function attachDailyAttendance(dailyMap, attendanceIndex) {
   dailyMap.forEach((daily) => {
     const events = attendanceIndex.get(daily.person) || [];
-    const dayStart = addDays(new Date(daily.date.getFullYear(), daily.date.getMonth(), daily.date.getDate()), 0);
-    const dayEnd = addDays(dayStart, 1);
-    daily.attendanceEvents = events.filter((event) => event.time >= dayStart && event.time < dayEnd);
+    const start = new Date(daily.date.getFullYear(), daily.date.getMonth(), daily.date.getDate());
+    const end = addDays(start, 1);
+    daily.attendanceEvents = events.filter((event) => event.time >= start && event.time < end);
   });
 }
 
 function recordFromApplication(app, scheduleByKey, wageMap, attendanceIndex) {
   const schedule = scheduleByKey.get(dailyKey(app.person, app.dateKey));
-  const type = app.category || schedule?.type || classifyDay(app.shift || schedule?.shift || "", "");
+  const type = normalizeOvertimeType(app.category || schedule?.type || classifyDay(schedule?.shift || app.shift || "", ""));
   const hourly = app.hourly || wageMap.get(`${app.person}|${app.month}`) || wageMap.get(`*|${app.month}`) || 0;
-  const overtimePay = calculateOvertimePay(app.hours, hourly, type);
-  const fee = app.amount || overtimePay.total;
-  const shift = app.shift || schedule?.shift || "";
+  const payResult = calculateOvertimePay(app.hours, hourly, type);
   const attendance = evaluateAttendanceRecord(app, attendanceIndex.get(app.person) || []);
-  const fallbackRisks = attendance.risks.length ? [] : auditTextToRisks(app.audit);
-  const risks = unique([...attendance.risks, ...fallbackRisks]);
-  const riskDetails = unique([
-    ...attendance.details,
-    ...buildAuditFallbackDetails(app.audit, fallbackRisks),
-  ]);
+  const audit = auditTextToCategories(app.audit);
 
-  return {
+  const record = {
     id: `${app.person}-${app.dateKey}-${app.sourceSheet}-${app.sourceRow}`,
     source: "加班單申請",
     person: app.person,
     date: app.date,
     dateKey: app.dateKey,
     month: app.month,
-    shift,
+    shift: schedule?.shift || app.shift || "",
     type,
     reason: app.reason,
     hours: app.hours,
     hourly,
-    estimatedPay: fee,
-    segments: overtimePay.segments,
+    estimatedPay: payResult.total,
+    segments: payResult.segments,
+    payNote: payResult.note,
     audit: app.audit,
     start: app.start,
     end: app.end,
     startRaw: app.startRaw,
     endRaw: app.endRaw,
     normalAttendanceText: app.normalAttendanceText,
-    risks,
-    riskDetails,
+    attendanceStatuses: unique([...attendance.statuses, ...audit.attendanceStatuses]),
+    attendanceDetails: unique([...attendance.details, ...audit.attendanceDetails]),
+    attendanceSections: attendance.sections,
+    workRisks: unique(audit.workRisks),
+    workRiskDetails: unique(audit.workRiskDetails),
     matchedEntry: attendance.entry,
-    matchedClockIn: attendance.clockIn,
+    matchedStart: attendance.entry,
     matchedExit: attendance.exit,
+    isHolidayApplication: [DAY_TYPE.HOLIDAY, DAY_TYPE.FIXED_HOLIDAY].includes(type),
   };
+
+  if (!record.attendanceStatuses.length) {
+    record.attendanceDetails = unique([
+      `出勤狀況：${ATTENDANCE_STATUS.NORMAL.long}。`,
+      ...record.attendanceDetails,
+    ]);
+  }
+
+  refreshRecordDerived(record);
+  return record;
 }
 
 function recordFromSchedule(row, wageMap) {
   const hourly = wageMap.get(`${row.person}|${row.month}`) || wageMap.get(`*|${row.month}`) || 0;
-  const pay = calculateOvertimePay(row.overtimeHours, hourly, row.type);
-  return {
+  const payResult = calculateOvertimePay(row.overtimeHours, hourly, row.type);
+  const record = {
     id: `${row.person}-${row.dateKey}-schedule-${row.rowIndex}`,
     source: "排班加班時數",
     person: row.person,
@@ -637,90 +711,181 @@ function recordFromSchedule(row, wageMap) {
     reason: row.attendanceIssue || row.attendanceResult || "排班加班時數",
     hours: row.overtimeHours,
     hourly,
-    estimatedPay: pay.total,
-    segments: pay.segments,
+    estimatedPay: payResult.total,
+    segments: payResult.segments,
+    payNote: payResult.note,
     audit: "待覆核",
     start: null,
     end: null,
     startRaw: "",
     endRaw: "",
     normalAttendanceText: "",
-    risks: [RISK.PENDING_REVIEW],
-    riskDetails: ["差勤待覆核：未讀到加班單申請，先以排班加班時數呈現。"],
+    attendanceStatuses: [],
+    attendanceDetails: ["出勤狀況：待覆核。未讀到加班單申請，請再確認原始資料。"],
+    workRisks: [WORK_RISK.PENDING_REVIEW],
+    workRiskDetails: ["差勤待覆核：未讀到加班單申請，先以排班加班時數呈現。"],
     matchedEntry: null,
     matchedClockIn: null,
     matchedExit: null,
+    isHolidayApplication: false,
   };
+  refreshRecordDerived(record);
+  return record;
+}
+
+function refreshRecordDerived(record) {
+  record.risks = unique([...record.attendanceStatuses, ...record.workRisks]);
+  record.riskDetails = unique([...record.attendanceDetails, ...record.workRiskDetails]);
+  record.attendanceLabel = record.attendanceStatuses.length
+    ? record.attendanceStatuses.map(statusDisplayLabel).join("、")
+    : ATTENDANCE_STATUS.NORMAL.short;
 }
 
 function evaluateAttendanceRecord(app, personEvents) {
-  const risks = [];
-  const details = [];
   if (!app.start || !app.end) {
-    return { risks, details, entry: null, clockIn: null, exit: null };
+    return { statuses: [], details: [], entry: null, exit: null, sections: [] };
   }
 
+  const sections = shouldAuditCarAndClockSeparately(app.dateKey)
+    ? [
+      evaluateAttendanceSection(app, personEvents, {
+        key: "car",
+        title: "汽車進出",
+        sourceGroups: ["car"],
+        auditChannels: ["car"],
+        showNormalInCalendar: true,
+        missingSourceLabel: "無汽車進出紀錄",
+      }),
+      evaluateAttendanceSection(app, personEvents, {
+        key: "clock",
+        title: "簽到退",
+        sourceGroups: ["schedule", "application"],
+        auditChannels: ["clock"],
+        showNormalInCalendar: true,
+      }),
+    ]
+    : [
+      evaluateAttendanceSection(app, personEvents, {
+        key: "clock",
+        title: "簽到退",
+        sourceGroups: ["schedule", "application"],
+        auditChannels: ["clock"],
+        showNormalInCalendar: false,
+      }),
+    ];
+
+  const activeSections = sections.filter(Boolean);
+  const statuses = unique(activeSections.flatMap((section) => section.statuses));
+  const details = unique(activeSections.flatMap((section) => section.details));
+  const primarySection = activeSections.find((section) => section.key === "car" && section.hasEvidence)
+    || activeSections.find((section) => section.key === "clock" && section.hasEvidence)
+    || activeSections[0]
+    || null;
+
+  return {
+    statuses,
+    details,
+    entry: primarySection?.entry || null,
+    exit: primarySection?.exit || null,
+    sections: activeSections,
+  };
+}
+
+function evaluateAttendanceSection(app, personEvents, options) {
   const windowStart = addHours(app.start, -ENTRY_LOOKBACK_HOURS);
   const windowEnd = addHours(app.end, EXIT_LOOKAHEAD_HOURS);
-  const entryEvents = personEvents.filter((event) => event.direction === "entry" && event.time >= windowStart && event.time <= windowEnd);
-  const exitEvents = personEvents.filter((event) => event.direction === "exit" && event.time >= windowStart && event.time <= windowEnd);
-  const clockInEvents = entryEvents.filter((event) => event.isClockRecord);
+  const scopedEvents = personEvents.filter((event) => (
+    options.sourceGroups.includes(event.sourceGroup)
+    && options.auditChannels.includes(event.auditChannel)
+    && event.time >= windowStart
+    && event.time <= windowEnd
+  ));
+  const entryEvents = scopedEvents.filter((event) => event.direction === "entry");
+  const exitEvents = scopedEvents.filter((event) => event.direction === "exit");
 
-  const entry = pickEntryCandidate(entryEvents, exitEvents, app.start, app.end);
-  const clockIn = pickEntryCandidate(clockInEvents, exitEvents, app.start, app.end);
-  const exit = pickExitCandidate(exitEvents, app.start, app.end);
-  const earlyExit = exit ? null : pickEarlyExitCandidate(exitEvents, entry?.time || app.start, app.end);
-
-  if (!entry) {
-    risks.push(RISK.MISSING_SIGN_IN);
-    details.push(`${RISK.MISSING_SIGN_IN}：${formatDateTime(app.start)} 起未找到可佐證開始加班的紀錄。`);
+  if (options.missingSourceLabel && entryEvents.length === 0 && exitEvents.length === 0) {
+    return {
+      key: options.key,
+      title: options.title,
+      statuses: [],
+      details: [`${options.title}出勤狀況：${options.missingSourceLabel}。`],
+      entry: null,
+      exit: null,
+      calendarText: `${options.title}：${options.missingSourceLabel}`,
+      calendarTone: "warn",
+      hasEvidence: false,
+    };
   }
 
-  if (clockIn && clockIn.time > addMinutes(app.start, TOLERANCE_MINUTES)) {
-    risks.push(RISK.LATE_OVERTIME);
+  const statuses = [];
+  const details = [];
+  const entry = pickEntryCandidate(entryEvents, exitEvents, app.start, app.end, options.sourceGroups);
+  const exitEvidence = pickExitEvidence(exitEvents, entry?.time || app.start, app.end, options.sourceGroups);
+  const exit = exitEvidence.outcome === "matched" ? exitEvidence.event : null;
+  const earlyExit = exitEvidence.outcome === "early" ? exitEvidence.event : null;
+
+  if (!entry) {
+    statuses.push(ATTENDANCE_STATUS.MISSING_SIGN_IN.short);
+    details.push(`${options.title}｜${ATTENDANCE_STATUS.MISSING_SIGN_IN.long}：${formatDateTime(app.start)} 起未找到可佐證開始加班的紀錄。`);
+  }
+
+  if (entry && entry.time > app.start) {
+    statuses.push(ATTENDANCE_STATUS.LATE_OVERTIME.short);
     details.push(
-      `${RISK.LATE_OVERTIME}：加班起始 ${formatDateTime(app.start)}，實際簽到 ${formatDateTime(clockIn.time)}（${clockIn.sourceLabel}）。`,
+      `${options.title}｜${ATTENDANCE_STATUS.LATE_OVERTIME.long}：加班起始 ${formatDateTime(app.start)}，實際採認開始紀錄為 ${formatDateTime(entry.time)}（${entry.sourceLabel}）。`,
     );
   }
 
   if (exit) {
-    details.push(`出勤採認：結束以 ${formatDateTime(exit.time)}（${exit.sourceLabel}）作為佐證。`);
+    details.push(`${options.title}佐證：加班結束以 ${formatDateTime(exit.time)}（${exit.sourceLabel}）採認。`);
   } else if (earlyExit) {
-    risks.push(RISK.EARLY_LEAVE);
+    statuses.push(ATTENDANCE_STATUS.EARLY_LEAVE.short);
     details.push(
-      `${RISK.EARLY_LEAVE}：加班預計至 ${formatDateTime(app.end)}，最晚離院/簽退為 ${formatDateTime(earlyExit.time)}（${earlyExit.sourceLabel}）。`,
+      `${options.title}｜${ATTENDANCE_STATUS.EARLY_LEAVE.long}：加班預計至 ${formatDateTime(app.end)}，最晚離院/簽退為 ${formatDateTime(earlyExit.time)}（${earlyExit.sourceLabel}）。`,
     );
   } else {
-    risks.push(RISK.MISSING_SIGN_OUT);
-    details.push(`${RISK.MISSING_SIGN_OUT}：${formatDateTime(app.end)} 前後未找到可佐證結束加班的紀錄。`);
+    statuses.push(ATTENDANCE_STATUS.MISSING_SIGN_OUT.short);
+    details.push(`${options.title}｜${ATTENDANCE_STATUS.MISSING_SIGN_OUT.long}：${formatDateTime(app.end)} 前後未找到可佐證結束加班的紀錄。`);
+  }
+
+  if (!statuses.length) {
+    details.unshift(`${options.title}出勤狀況：${ATTENDANCE_STATUS.NORMAL.long}。`);
   }
 
   return {
-    risks: unique(risks),
+    key: options.key,
+    title: options.title,
+    statuses: unique(statuses),
     details: unique(details),
     entry,
-    clockIn,
     exit: exit || earlyExit || null,
+    calendarText: buildAttendanceSectionCalendarText(options.title, unique(statuses), options.showNormalInCalendar),
+    calendarTone: attendanceClass(unique(statuses)),
+    hasEvidence: entryEvents.length > 0 || exitEvents.length > 0,
   };
 }
 
-function pickEntryCandidate(events, exitEvents, start, end) {
-  const onTime = events
-    .filter((event) => event.time <= addMinutes(start, TOLERANCE_MINUTES))
-    .sort((a, b) => b.time - a.time)
-    .find((event) => !hasExitBetween(exitEvents, event.time, start));
-  if (onTime) return onTime;
+function pickEntryCandidate(events, exitEvents, start, end, priorityGroups = ATTENDANCE_SOURCE_PRIORITY) {
+  for (const sourceGroup of priorityGroups) {
+    const scopedEvents = events.filter((event) => event.sourceGroup === sourceGroup);
+    if (!scopedEvents.length) continue;
 
-  return events
-    .filter((event) => event.time > addMinutes(start, TOLERANCE_MINUTES) && event.time <= addMinutes(end, TOLERANCE_MINUTES))
-    .sort((a, b) => a.time - b.time)[0] || null;
+    const onTime = scopedEvents
+      .filter((event) => event.time <= addMinutes(start, TOLERANCE_MINUTES))
+      .sort((a, b) => b.time - a.time)
+      .find((event) => !hasExitBetween(exitEvents, event.time, start));
+    if (onTime) return onTime;
+
+    const lateEntry = scopedEvents
+      .filter((event) => event.time > addMinutes(start, TOLERANCE_MINUTES) && event.time <= addMinutes(end, TOLERANCE_MINUTES))
+      .sort((a, b) => a.time - b.time)[0] || null;
+    if (lateEntry) return lateEntry;
+  }
+
+  return null;
 }
 
-function hasExitBetween(exitEvents, fromTime, toTime) {
-  return exitEvents.some((event) => event.time > fromTime && event.time < addMinutes(toTime, TOLERANCE_MINUTES));
-}
-
-function pickExitCandidate(events, start, end) {
+function pickExitCandidate(events, end) {
   return events
     .filter((event) => event.time >= addMinutes(end, -TOLERANCE_MINUTES) && event.time <= addHours(end, EXIT_LOOKAHEAD_HOURS))
     .sort((a, b) => a.time - b.time)[0] || null;
@@ -732,20 +897,57 @@ function pickEarlyExitCandidate(events, start, end) {
     .sort((a, b) => b.time - a.time)[0] || null;
 }
 
-function buildAuditFallbackDetails(text, risks) {
+function pickExitEvidence(events, start, end, priorityGroups = ATTENDANCE_SOURCE_PRIORITY) {
+  for (const sourceGroup of priorityGroups) {
+    const scopedEvents = events.filter((event) => event.sourceGroup === sourceGroup);
+    if (!scopedEvents.length) continue;
+
+    const matchedExit = pickExitCandidate(scopedEvents, end);
+    if (matchedExit) return { outcome: "matched", event: matchedExit };
+
+    const earlyExit = pickEarlyExitCandidate(scopedEvents, start, end);
+    if (earlyExit) return { outcome: "early", event: earlyExit };
+  }
+
+  return { outcome: "missing", event: null };
+}
+
+function hasExitBetween(exitEvents, fromTime, toTime) {
+  return exitEvents.some((event) => event.time > fromTime && event.time < addMinutes(toTime, TOLERANCE_MINUTES));
+}
+
+function auditTextToCategories(text) {
   const value = cleanText(text);
-  if (!value || !risks.length) return [];
-  return risks.map((risk) => `${risk}：${value}`);
+  if (!value || value === "正常" || value === "無") {
+    return {
+      attendanceStatuses: [],
+      attendanceDetails: [],
+      workRisks: [],
+      workRiskDetails: [],
+    };
+  }
+
+  const attendanceStatuses = [];
+  const workRisks = [];
+
+  if (/提早離院/.test(value)) attendanceStatuses.push(ATTENDANCE_STATUS.EARLY_LEAVE.short);
+  if (/晚於加班/.test(value)) attendanceStatuses.push(ATTENDANCE_STATUS.LATE_OVERTIME.short);
+  if (/簽到無紀錄|車進無紀錄/.test(value)) attendanceStatuses.push(ATTENDANCE_STATUS.MISSING_SIGN_IN.short);
+  if (/簽退無紀錄|車出無符合紀錄|簽退未佐證加班/.test(value)) attendanceStatuses.push(ATTENDANCE_STATUS.MISSING_SIGN_OUT.short);
+  if (value.includes("12小時") || (value.includes("12") && value.includes("小時"))) workRisks.push(WORK_RISK.OVER_12_HOURS);
+
+  return {
+    attendanceStatuses: unique(attendanceStatuses),
+    attendanceDetails: unique(attendanceStatuses.map((status) => `${statusLongLabel(status)}：${value}`)),
+    workRisks: unique(workRisks),
+    workRiskDetails: unique(workRisks.map((risk) => `${risk}：${value}`)),
+  };
 }
 
 function applyScheduleRisks(dailyMap) {
-  state.scheduleRows.forEach((row) => {
-    const daily = dailyMap.get(dailyKey(row.person, row.dateKey));
-    if (!daily) return;
-
-    const worked = row.overtimeHours > 0 || row.signIn || row.signOut || row.otherSignIns.length > 0 || row.otherSignOuts.length > 0;
-    if ((row.type === "例假日" || row.type === "國定假日") && worked) {
-      addRisk(daily, RISK.HOLIDAY_WORK, `${row.shift || row.type} 有出勤或加班紀錄。`);
+  dailyMap.forEach((daily) => {
+    if ([DAY_TYPE.HOLIDAY, DAY_TYPE.FIXED_HOLIDAY].includes(daily.type) && daily.overtimeRecords.length > 0) {
+      addWorkRisk(daily, WORK_RISK.HOLIDAY_WORK, `${daily.shift || daily.type} 有有效加班申請。`);
     }
   });
 
@@ -755,14 +957,14 @@ function applyScheduleRisks(dailyMap) {
     rows.forEach((row, index) => {
       const next = rows[index + 1];
       if (!next) return;
-      const dayEnd = latestTime([row.signOut, ...row.otherSignOuts]);
+      const currentEnd = latestTime([row.signOut, ...row.otherSignOuts]);
       const nextStart = earliestTime([next.signIn, ...next.otherSignIns]);
-      if (!dayEnd || !nextStart) return;
+      if (!currentEnd || !nextStart) return;
 
-      const restHours = (nextStart - dayEnd) / 36e5;
+      const restHours = (nextStart - currentEnd) / 36e5;
       if (restHours >= 0 && restHours < 11) {
         const daily = dailyMap.get(dailyKey(row.person, row.dateKey));
-        addRisk(daily, RISK.REST_LESS_11, `次日上班前休息僅 ${formatNumber(restHours, 1)} 小時。`);
+        addWorkRisk(daily, WORK_RISK.REST_LESS_11, `次日上班前休息僅 ${formatNumber(restHours, 1)} 小時。`);
       }
     });
   });
@@ -771,37 +973,102 @@ function applyScheduleRisks(dailyMap) {
 function applyMonthlyOvertimeRisk(records, dailyMap) {
   const grouped = groupBy(records, (record) => `${record.person}|${record.month}`);
   grouped.forEach((items) => {
-    items.sort((a, b) => a.date - b.date);
+    items.sort((a, b) => a.date - b.date || (a.start?.getTime() || 0) - (b.start?.getTime() || 0));
     let cumulative = 0;
     items.forEach((record) => {
       cumulative += record.hours;
       record.monthlyCumulative = cumulative;
       if (cumulative > 46) {
-        record.risks.push(RISK.OVER_46_HOURS);
-        record.riskDetails.push(`${RISK.OVER_46_HOURS}：當月累計加班 ${formatNumber(cumulative, 1)} 小時。`);
+        record.workRisks.push(WORK_RISK.OVER_46_HOURS);
+        record.workRiskDetails.push(`${WORK_RISK.OVER_46_HOURS}：當月累計延展工時 ${formatNumber(cumulative, 1)} 小時。`);
+        refreshRecordDerived(record);
         const daily = dailyMap.get(dailyKey(record.person, record.dateKey));
-        addRisk(daily, RISK.OVER_46_HOURS, `當月累計加班 ${formatNumber(cumulative, 1)} 小時。`);
+        addWorkRisk(daily, WORK_RISK.OVER_46_HOURS, `當月累計延展工時 ${formatNumber(cumulative, 1)} 小時。`);
       }
     });
   });
 }
 
-function finalizeDailyRisks(dailyMap) {
+function finalizeDailyRows(dailyMap) {
   dailyMap.forEach((daily) => {
+    const attendanceStatuses = [];
+    const attendanceDetails = [];
+    const attendanceCalendarLines = [];
+    const workRisks = [];
+    const workRiskDetails = [...daily.workRiskDetails];
+
     daily.overtimeRecords.forEach((record) => {
-      record.risks.forEach((risk) => addRisk(daily, risk));
-      record.riskDetails.forEach((detail) => daily.riskDetails.push(detail));
+      attendanceStatuses.push(...record.attendanceStatuses);
+      attendanceDetails.push(...record.attendanceDetails);
+      attendanceCalendarLines.push(...buildRecordAttendanceCalendarLines(record));
+      workRisks.push(...record.workRisks);
+      workRiskDetails.push(...record.workRiskDetails);
     });
 
     const totalWorkHours = daily.scheduledHours + daily.overtimeHours;
     daily.totalWorkHours = totalWorkHours;
     if (totalWorkHours > 12) {
-      addRisk(daily, RISK.OVER_12_HOURS, `日排班加加班合計 ${formatNumber(totalWorkHours, 1)} 小時。`);
+      addWorkRisk(daily, WORK_RISK.OVER_12_HOURS, `日排班加延展工時合計 ${formatNumber(totalWorkHours, 1)} 小時。`);
     }
 
-    daily.risks = unique(daily.risks);
-    daily.riskDetails = unique(daily.riskDetails);
+    daily.attendanceStatuses = unique(attendanceStatuses);
+    daily.attendanceDetails = unique(attendanceDetails);
+    daily.attendanceCalendarLines = uniqueBy(attendanceCalendarLines, (line) => `${line.text}|${line.tone}`);
+    daily.workRisks = unique([...daily.workRisks, ...workRisks]);
+    daily.workRiskDetails = unique([...daily.workRiskDetails, ...workRiskDetails]);
+    daily.calendarNotes = buildCalendarNotes(daily);
+    daily.hasNormalAttendance = daily.overtimeRecords.length > 0 && daily.attendanceStatuses.length === 0;
+    daily.risks = unique([...daily.attendanceStatuses, ...daily.workRisks]);
+    daily.riskDetails = unique([...daily.attendanceDetails, ...daily.workRiskDetails]);
   });
+}
+
+function buildCalendarNotes(daily) {
+  const notes = [];
+  if (daily.workRisks.includes(WORK_RISK.REST_LESS_11) && daily.overtimeRecords.length === 0) {
+    const signIn = daily.signIn ? `簽到 ${formatCalendarTime(daily.signIn, daily.date)}` : "";
+    const signOut = daily.signOut ? `簽退 ${formatCalendarTime(daily.signOut, daily.date)}` : "";
+    if (signIn || signOut) notes.push([signIn, signOut].filter(Boolean).join(" / "));
+  }
+  return notes;
+}
+
+function buildRecordAttendanceCalendarLines(record) {
+  if (!record.attendanceSections?.length) return [];
+
+  if (shouldAuditCarAndClockSeparately(record.dateKey)) {
+    return record.attendanceSections
+      .map((section) => (
+        section.calendarText
+          ? { text: section.calendarText, tone: section.calendarTone || "ok" }
+          : null
+      ))
+      .filter(Boolean);
+  }
+
+  if (!record.attendanceStatuses.length) return [];
+  return [{
+    text: `簽到退：${record.attendanceStatuses.map(statusDisplayLabel).join("、")}`,
+    tone: attendanceClass(record.attendanceStatuses),
+  }];
+}
+
+function buildAttendanceSectionCalendarText(title, statuses, showNormalInCalendar = false) {
+  if (statuses.length) return `${title}：${statuses.map(statusDisplayLabel).join("、")}`;
+  if (showNormalInCalendar) return `${title}：${ATTENDANCE_STATUS.NORMAL.long}`;
+  return "";
+}
+
+function shouldAuditCarAndClockSeparately(dateKey) {
+  return dateKey <= CAR_AUDIT_CUTOFF_DATEKEY;
+}
+
+function addWorkRisk(target, risk, detail = "") {
+  if (!target || !risk) return;
+  if (!target.workRisks) target.workRisks = [];
+  if (!target.workRiskDetails) target.workRiskDetails = [];
+  target.workRisks.push(risk);
+  if (detail) target.workRiskDetails.push(`${risk}：${detail}`);
 }
 
 function setupControls() {
@@ -891,46 +1158,69 @@ function renderCalendar(dailyRows) {
     cell.className = "day-cell";
     if (current.getMonth() !== monthDate.getMonth()) cell.classList.add("outside");
     if (state.selectedDateKey === dateKey) cell.classList.add("selected");
+    if (items[0]?.type) cell.classList.add(dayTypeClass(items[0].type));
     cell.addEventListener("click", () => {
       state.selectedDateKey = dateKey;
       renderDetail(dailyRows);
       renderCalendar(dailyRows);
     });
-    cell.innerHTML = dayCellHtml(current, items);
+    cell.innerHTML = dayCellHtml(current, items, current.getMonth() !== monthDate.getMonth());
     dom.calendarGrid.appendChild(cell);
   }
 }
 
-function dayCellHtml(date, items) {
-  const totalHours = sum(items.map((item) => item.overtimeHours));
+function dayCellHtml(date, items, isOutside = false) {
+  const daily = items[0];
+  const shift = isOutside ? "" : daily?.shift || "";
+  const overtimeHours = sum(items.map((item) => item.overtimeHours));
   const totalPay = sum(items.map((item) => item.estimatedPay));
-  const risks = unique(items.flatMap((item) => item.risks));
-  const first = items[0];
-  const badge = risks.length
-    ? `<span class="badge danger">${risks.length}</span>`
-    : totalHours
-      ? `<span class="badge warn">${formatNumber(totalHours, 1)}h</span>`
-      : "";
-  const personLine = items.length > 1
-    ? `${unique(items.map((item) => item.person)).length} 人 / ${items.length} 筆`
-    : first?.person || "";
-  const shiftLine = first?.shift || "";
-  const payLine = totalPay ? currency(totalPay) : "";
-  const riskPreview = risks.slice(0, 2).map((risk) => `<span class="mini-risk">${escapeHtml(risk)}</span>`).join("");
+  const attendanceLines = uniqueBy(items.flatMap((item) => item.attendanceCalendarLines || []), (line) => `${line.text}|${line.tone}`);
+  const anomalyLines = uniqueBy(items.flatMap((item) => buildDayRecordIssueLines(item.overtimeRecords || [])), (line) => `${line.range}|${line.label}|${line.tone}`);
+  const workRisks = unique(items.flatMap((item) => item.workRisks.filter((risk) => risk !== WORK_RISK.PENDING_REVIEW)));
+  const notes = unique(items.flatMap((item) => item.calendarNotes));
+  const rows = [];
+
+  if (overtimeHours > 0) rows.push(dayLineHtml(`⏱️延展工時 ${formatNumber(overtimeHours, 1)} h`, "metric metric-hours"));
+  if (totalPay > 0) rows.push(dayLineHtml(`💰加班費${currency(totalPay)}`, "metric metric-pay"));
+  if (anomalyLines.length) {
+    anomalyLines.forEach((line) => rows.push(dayIssueHtml(line)));
+  } else {
+    attendanceLines.forEach((line) => rows.push(dayLineHtml(line.text, `attendance ${line.tone}`)));
+  }
+  if (workRisks.length) {
+    rows.push(`<div class="day-pill-row">${workRisks.map((risk) => dayPillHtml(risk, riskPillClass(risk))).join("")}</div>`);
+  }
+  notes.forEach((note) => rows.push(dayLineHtml(note, "note")));
 
   return `
     <div class="day-top">
-      <span class="day-number">${date.getDate()}</span>
-      ${badge}
+      <div class="day-meta">
+        <span class="day-number">${isOutside ? "&nbsp;" : `${date.getDate()}日`}</span>
+        ${shift ? `<span class="day-shift-inline">${escapeHtml(shift)}</span>` : ""}
+      </div>
     </div>
-    <div class="day-lines">
-      <span>${escapeHtml(personLine)}</span>
-      <span>${escapeHtml(shiftLine)}</span>
-      <span>${totalHours ? `加班 ${formatNumber(totalHours, 1)}h` : ""}</span>
-      <span>${escapeHtml(payLine)}</span>
+    <div class="day-content">
+      ${rows.join("")}
     </div>
-    <div class="risk-preview">${riskPreview}</div>
   `;
+}
+
+function dayLineHtml(text, kind = "") {
+  return `<div class="day-line ${kind}">${escapeHtml(text)}</div>`;
+}
+
+function dayIssueHtml(line) {
+  const range = line.range ? `<span class="day-issue-range">${escapeHtml(line.range)}</span>` : "";
+  const pill = dayPillHtml(line.label, `attendance ${line.tone}`);
+  return `<div class="day-issue-line">${range}${pill}</div>`;
+}
+
+function dayPillHtml(text, kind = "") {
+  return `<span class="day-pill ${kind}">${escapeHtml(text)}</span>`;
+}
+
+function riskPillClass(risk) {
+  return risk === WORK_RISK.HOLIDAY_WORK ? "work-risk holiday-work" : "work-risk";
 }
 
 function renderDetail(dailyRows) {
@@ -949,23 +1239,40 @@ function renderDetail(dailyRows) {
   const date = parseDateValue(selectedKey);
   const totalHours = sum(items.map((item) => item.overtimeHours));
   const totalPay = sum(items.map((item) => item.estimatedPay));
-  const risks = unique(items.flatMap((item) => item.risks));
   const records = items.flatMap((item) => item.overtimeRecords);
+  const attendanceStatuses = unique(items.flatMap((item) => item.attendanceStatuses));
+  const workRisks = unique(items.flatMap((item) => item.workRisks.filter((risk) => risk !== WORK_RISK.PENDING_REVIEW)));
   const attendanceEvents = uniqueBy(
     items.flatMap((item) => item.attendanceEvents),
     (event) => `${event.person}|${event.direction}|${event.sourceLabel}|${event.time.getTime()}`,
   ).sort((a, b) => a.time - b.time);
+  const attendanceBadges = attendanceStatuses.length
+    ? attendanceStatuses.map((status) => statusBadgeHtml(statusDisplayLabel(status), "attendance")).join("")
+    : records.length
+      ? statusBadgeHtml(ATTENDANCE_STATUS.NORMAL.long, "attendance ok")
+      : '<span class="badge">無加班申請</span>';
+  const workBadges = workRisks.length
+    ? workRisks.map((risk) => statusBadgeHtml(risk, risk === WORK_RISK.HOLIDAY_WORK ? "work holiday-work" : "work")).join("")
+    : '<span class="badge">無</span>';
 
   dom.detailTitle.textContent = formatDisplayDate(date);
   dom.detailSubtitle.textContent = `${items.length} 筆日資料，${records.length} 筆加班單`;
   dom.detailBody.className = "detail-body";
   dom.detailBody.innerHTML = `
     <div class="detail-stack">
-      <div class="detail-row"><span>人員</span><strong>${escapeHtml(unique(items.map((item) => item.person)).join("、"))}</strong></div>
       <div class="detail-row"><span>加班時數</span><strong>${formatNumber(totalHours, 1)} 小時</strong></div>
-      <div class="detail-row"><span>估算加班費</span><strong>${currency(totalPay)}</strong></div>
-      <div class="detail-row"><span>異常</span><div class="risk-list">${risks.length ? risks.map((risk) => `<span class="badge danger">${escapeHtml(risk)}</span>`).join("") : '<span class="badge">無</span>'}</div></div>
+      <div class="detail-row"><span>額外加班費</span><strong>${currency(totalPay)}</strong></div>
       <div class="detail-row"><span>當日紀錄</span><div class="timeline-text">${attendanceEvents.length ? attendanceEvents.map(formatAttendanceEvent).join("、") : "無"}</div></div>
+      <section class="detail-section">
+        <h3>出勤狀況</h3>
+        <div class="risk-list">${attendanceBadges}</div>
+        <div class="detail-notes">${renderNoteList(unique(items.flatMap((item) => item.attendanceDetails)))}</div>
+      </section>
+      <section class="detail-section">
+        <h3>延展工時異常</h3>
+        <div class="risk-list">${workBadges}</div>
+        <div class="detail-notes">${renderNoteList(unique(items.flatMap((item) => item.workRiskDetails)))}</div>
+      </section>
       <div class="record-list">${records.length ? records.map(recordHtml).join("") : '<div class="empty-state">目前沒有加班單明細。</div>'}</div>
     </div>
   `;
@@ -973,24 +1280,44 @@ function renderDetail(dailyRows) {
 
 function recordHtml(record) {
   const segments = record.segments
-    .filter((segment) => segment.hours > 0)
-    .map((segment) => `${segment.label} ${formatNumber(segment.hours, 1)}h`)
+    .filter((segment) => segment.hours > 0 || segment.paidHours > 0)
+    .map((segment) => {
+      const hoursText = segment.paidHours && segment.paidHours !== segment.hours
+        ? `${formatNumber(segment.hours, 1)}h（計 ${formatNumber(segment.paidHours, 1)}h）`
+        : `${formatNumber(segment.hours, 1)}h`;
+      return `${segment.label} ${hoursText}`;
+    })
     .join("、");
 
-  const matchedBits = [];
-  if (record.matchedClockIn) matchedBits.push(`簽到 ${formatDateTime(record.matchedClockIn.time)}（${record.matchedClockIn.sourceLabel}）`);
-  else if (record.matchedEntry) matchedBits.push(`起始佐證 ${formatDateTime(record.matchedEntry.time)}（${record.matchedEntry.sourceLabel}）`);
-  if (record.matchedExit) matchedBits.push(`結束佐證 ${formatDateTime(record.matchedExit.time)}（${record.matchedExit.sourceLabel}）`);
+  const attendanceLabel = record.attendanceStatuses.length
+    ? record.attendanceStatuses.map(statusLongLabel).join("、")
+    : ATTENDANCE_STATUS.NORMAL.long;
+  const workLabel = record.workRisks.filter((risk) => risk !== WORK_RISK.PENDING_REVIEW).join("、") || "無";
+  const evidenceItems = buildRecordEvidenceItems(record);
+  const issueItems = buildRecordIssueItems(record);
+  const rangeText = formatRange(record.start, record.end, record.startRaw, record.endRaw);
 
   return `
     <article class="record-item">
-      <strong>${escapeHtml(record.person)}｜${escapeHtml(record.type)}｜${formatNumber(record.hours, 1)}h</strong>
-      <p>${escapeHtml(record.reason || record.source)}</p>
-      <p>區間 ${escapeHtml(formatRange(record.start, record.end, record.startRaw, record.endRaw))}</p>
-      <p>時薪 ${record.hourly ? currency(record.hourly) : "未提供"}，估算 ${currency(record.estimatedPay)}</p>
-      <p>${escapeHtml(segments || "無倍率拆段")}</p>
-      <p>${escapeHtml(matchedBits.join("；") || record.normalAttendanceText || record.audit || "無額外佐證說明")}</p>
-      <p class="record-risk-detail">${escapeHtml(record.riskDetails.join("；") || "無異常")}</p>
+      <div class="record-header">
+        <strong>${escapeHtml(rangeText)}</strong>
+        <span class="record-hours">${formatNumber(record.hours, 1)}h</span>
+      </div>
+      <p class="record-reason">${escapeHtml(record.reason || record.source)}</p>
+      <ul class="record-bullets">
+        <li>加班費 ${currency(record.estimatedPay)}${record.payNote ? `｜${escapeHtml(record.payNote)}` : ""}</li>
+        <li>倍率 ${escapeHtml(segments || "無倍率拆段")}</li>
+        <li>出勤狀況 ${escapeHtml(attendanceLabel)}</li>
+        <li>延展工時異常 ${escapeHtml(workLabel)}</li>
+      </ul>
+      <div class="record-mini-section">
+        <h4>出勤佐證</h4>
+        ${renderCompactList(evidenceItems)}
+      </div>
+      <div class="record-mini-section">
+        <h4>異常說明</h4>
+        ${renderCompactList(issueItems.length ? issueItems : ["無"])}
+      </div>
     </article>
   `;
 }
@@ -1010,9 +1337,31 @@ function renderRiskTable(dailyRows) {
       <td>${escapeHtml(daily.shift || daily.type)}</td>
       <td>${formatNumber(daily.overtimeHours, 1)} 小時</td>
       <td>${currency(daily.estimatedPay)}</td>
-      <td>${escapeHtml(daily.riskDetails.join("；"))}</td>
+      <td>${renderRiskSummaryCell(daily)}</td>
     </tr>
   `).join("");
+}
+
+function renderRiskSummaryCell(daily) {
+  const issueLines = buildDayRecordIssueLines(daily.overtimeRecords || []);
+  const workRiskPills = daily.workRisks
+    .filter((risk) => risk !== WORK_RISK.PENDING_REVIEW)
+    .map((risk) => dayPillHtml(risk, riskPillClass(risk)))
+    .join("");
+  const noteLines = (daily.calendarNotes || []).map((note) => `<div class="risk-note">${escapeHtml(note)}</div>`).join("");
+
+  return `
+    <div class="risk-summary">
+      ${issueLines.map((line) => `
+        <div class="risk-summary-line">
+          <span class="risk-time">${escapeHtml(line.range || "")}</span>
+          ${dayPillHtml(line.label, `attendance ${line.tone}`)}
+        </div>
+      `).join("")}
+      ${workRiskPills ? `<div class="day-pill-row">${workRiskPills}</div>` : ""}
+      ${noteLines}
+    </div>
+  `;
 }
 
 function renderEmptyCalendar() {
@@ -1028,7 +1377,7 @@ function renderEmptyCalendar() {
 function exportSummaryCsv() {
   const rows = getFilteredDailyRows();
   const grouped = groupBy(rows, (row) => `${row.month}|${row.person}`);
-  const data = [["月份", "人員", "加班時數", "估算加班費", "異常天數", "異常類型"]];
+  const data = [["月份", "人員", "延展工時", "額外加班費", "異常天數", "異常類型"]];
 
   grouped.forEach((items, key) => {
     const [month, person] = key.split("|");
@@ -1038,7 +1387,7 @@ function exportSummaryCsv() {
       formatNumber(sum(items.map((item) => item.overtimeHours)), 2),
       Math.round(sum(items.map((item) => item.estimatedPay))),
       items.filter((item) => item.risks.length > 0).length,
-      unique(items.flatMap((item) => item.risks)).join("、"),
+      unique(items.flatMap((item) => item.risks)).map(statusDisplayLabel).join("、"),
     ]);
   });
 
@@ -1052,12 +1401,13 @@ function exportDetailCsv() {
     "人員",
     "班別",
     "類別",
-    "加班時數",
+    "延展工時",
     "時薪",
-    "估算加班費",
+    "額外加班費",
     "起始時間",
     "終止時間",
-    "異常",
+    "出勤狀況",
+    "延展工時異常",
     "稽核說明",
     "事由",
   ]];
@@ -1074,7 +1424,8 @@ function exportDetailCsv() {
       Math.round(record.estimatedPay),
       formatDateTime(record.start) || record.startRaw,
       formatDateTime(record.end) || record.endRaw,
-      unique(record.risks).join("、"),
+      record.attendanceStatuses.length ? record.attendanceStatuses.map(statusLongLabel).join("、") : ATTENDANCE_STATUS.NORMAL.long,
+      record.workRisks.filter((risk) => risk !== WORK_RISK.PENDING_REVIEW).join("、"),
       record.riskDetails.join("；"),
       record.reason,
     ]);
@@ -1110,66 +1461,181 @@ function calculateOvertimePay(hours, hourly, type) {
   const safeHours = Math.max(0, Number(hours) || 0);
   const safeHourly = Math.max(0, Number(hourly) || 0);
   const segments = [];
+  const note = [];
   let remaining = safeHours;
 
-  const addSegment = (label, takeHours, multiplier) => {
-    const used = Math.min(remaining, takeHours);
-    if (used > 0) {
-      segments.push({
-        label,
-        hours: used,
-        multiplier,
-        amount: Math.ceil(used * safeHourly * multiplier),
-      });
-      remaining -= used;
-    }
+  const addSegment = (label, actualHours, multiplier, options = {}) => {
+    if (actualHours <= 0) return;
+    const paidHours = options.paidHours ?? actualHours;
+    segments.push({
+      label,
+      hours: actualHours,
+      paidHours,
+      multiplier,
+      amount: Math.ceil(paidHours * safeHourly * multiplier),
+    });
   };
 
-  if (["例假日", "國定假日"].includes(type)) {
-    addSegment("當日工資/補休", 8, 1);
-    addSegment("延展 1-2H", 2, 1.34);
-    addSegment("延展 3-4H", 2, 1.67);
-    addSegment("延展其餘", Number.POSITIVE_INFINITY, 1.67);
-  } else if (type === "休息日") {
-    addSegment("休息日 1-2H", 2, 1.34);
-    addSegment("休息日 3-8H", 6, 1.67);
-    addSegment("休息日 9H+", Number.POSITIVE_INFINITY, 2.67);
+  if (type === DAY_TYPE.FIXED_HOLIDAY) {
+    if (safeHours > 0) {
+      const firstBlock = Math.min(safeHours, 8);
+      addSegment("固定假日基本加給", firstBlock, 1, { paidHours: 8 });
+      note.push("未滿 8 小時仍以 8 小時計額外加給。");
+      remaining = Math.max(0, safeHours - 8);
+    }
+    const secondBlock = Math.min(remaining, 2);
+    addSegment("固定假日 9-10H", secondBlock, 1.34);
+    remaining -= secondBlock;
+    const thirdBlock = Math.min(remaining, 2);
+    addSegment("固定假日 11-12H", thirdBlock, 1.67);
+    remaining -= thirdBlock;
+    addSegment("固定假日 13H+", remaining, 1.67);
+  } else if (type === DAY_TYPE.HOLIDAY) {
+    const firstBlock = Math.min(remaining, 8);
+    addSegment("例假日基本加給", firstBlock, 1);
+    if (firstBlock > 0) note.push("另有一日補休。");
+    remaining -= firstBlock;
+    const secondBlock = Math.min(remaining, 2);
+    addSegment("例假日 9-10H", secondBlock, 1.34);
+    remaining -= secondBlock;
+    const thirdBlock = Math.min(remaining, 2);
+    addSegment("例假日 11-12H", thirdBlock, 1.67);
+    remaining -= thirdBlock;
+    addSegment("例假日 13H+", remaining, 1.67);
+  } else if (type === DAY_TYPE.SPECIAL) {
+    const firstBlock = Math.min(remaining, 8);
+    addSegment("天災/選舉日 1-8H", firstBlock, 1);
+    remaining -= firstBlock;
+    const secondBlock = Math.min(remaining, 2);
+    addSegment("天災/選舉日 9-10H", secondBlock, 1.34);
+    remaining -= secondBlock;
+    const thirdBlock = Math.min(remaining, 2);
+    addSegment("天災/選舉日 11-12H", thirdBlock, 1.67);
+    remaining -= thirdBlock;
+    addSegment("天災/選舉日 13H+", remaining, 1.67);
+  } else if (type === DAY_TYPE.RESTDAY) {
+    const firstBlock = Math.min(remaining, 2);
+    addSegment("休息日 1-2H", firstBlock, 1.34);
+    remaining -= firstBlock;
+    const secondBlock = Math.min(remaining, 6);
+    addSegment("休息日 3-8H", secondBlock, 1.67);
+    remaining -= secondBlock;
+    addSegment("休息日 9H+", remaining, 2.67);
   } else {
-    addSegment("平日 1-2H", 2, 1.34);
-    addSegment("平日 3H+", Number.POSITIVE_INFINITY, 1.67);
+    const firstBlock = Math.min(remaining, 2);
+    addSegment("平日 9-10H", firstBlock, 1.34);
+    remaining -= firstBlock;
+    addSegment("平日 11H+", remaining, 1.67);
   }
 
   return {
     total: sum(segments.map((segment) => segment.amount)),
     segments,
+    note: note.join(" "),
   };
 }
 
-function auditTextToRisks(text) {
-  const value = cleanText(text);
-  if (!value || value === "正常" || value === "無") return [];
-
-  const risks = [];
-  if (/提早離院/.test(value)) risks.push(RISK.EARLY_LEAVE);
-  if (/晚於加班/.test(value)) risks.push(RISK.LATE_OVERTIME);
-  if (/簽到無紀錄|車進無紀錄/.test(value)) risks.push(RISK.MISSING_SIGN_IN);
-  if (/簽退無紀錄|車出無符合紀錄|簽退未佐證加班/.test(value)) risks.push(RISK.MISSING_SIGN_OUT);
-  if (value.includes("12小時") || (value.includes("12") && value.includes("小時"))) risks.push(RISK.OVER_12_HOURS);
-  return unique(risks);
-}
-
-function addRisk(daily, risk, detail = "") {
-  if (!daily || !risk) return;
-  daily.risks.push(risk);
-  if (detail) daily.riskDetails.push(`${risk}：${detail}`);
+function normalizeOvertimeType(type) {
+  const value = cleanText(type);
+  if (!value) return DAY_TYPE.WORKDAY;
+  if ([DAY_TYPE.WORKDAY, DAY_TYPE.RESTDAY, DAY_TYPE.HOLIDAY, DAY_TYPE.FIXED_HOLIDAY, DAY_TYPE.SPECIAL].includes(value)) return value;
+  return classifyDay(value, value);
 }
 
 function classifyDay(shift, nationalHoliday) {
   const value = `${shift || ""} ${nationalHoliday || ""}`;
-  if (/國定|固定假/.test(value)) return "國定假日";
-  if (/例假/.test(value)) return "例假日";
-  if (/休息/.test(value)) return "休息日";
-  return "平日";
+  if (/天災|颱風|選舉/.test(value)) return DAY_TYPE.SPECIAL;
+  if (/國定|固定假/.test(value)) return DAY_TYPE.FIXED_HOLIDAY;
+  if (/例假/.test(value)) return DAY_TYPE.HOLIDAY;
+  if (/休息/.test(value)) return DAY_TYPE.RESTDAY;
+  return DAY_TYPE.WORKDAY;
+}
+
+function dayTypeClass(type) {
+  switch (type) {
+    case DAY_TYPE.RESTDAY:
+      return "type-restday";
+    case DAY_TYPE.HOLIDAY:
+      return "type-holiday";
+    case DAY_TYPE.FIXED_HOLIDAY:
+      return "type-fixed-holiday";
+    case DAY_TYPE.SPECIAL:
+      return "type-special";
+    default:
+      return "type-workday";
+  }
+}
+
+function attendanceClass(statuses) {
+  if (statuses.some((status) => [ATTENDANCE_STATUS.MISSING_SIGN_IN.short, ATTENDANCE_STATUS.MISSING_SIGN_OUT.short, ATTENDANCE_STATUS.EARLY_LEAVE.short].includes(status))) {
+    return "danger";
+  }
+  if (statuses.includes(ATTENDANCE_STATUS.LATE_OVERTIME.short)) return "warn";
+  return "ok";
+}
+
+function statusLongLabel(shortLabel) {
+  const matched = Object.values(ATTENDANCE_STATUS).find((item) => item.short === shortLabel);
+  return matched?.long || shortLabel;
+}
+
+function statusDisplayLabel(value) {
+  return statusLongLabel(value);
+}
+
+function statusBadgeHtml(text, extraClass = "") {
+  return `<span class="badge ${extraClass}">${escapeHtml(text)}</span>`;
+}
+
+function renderNoteList(items) {
+  if (!items.length) return '<div class="empty-note">無</div>';
+  return `<ul class="note-list">${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
+}
+
+function renderCompactList(items) {
+  if (!items.length) return '<div class="empty-note">無</div>';
+  return `<ul class="record-list-compact">${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
+}
+
+function buildDayRecordIssueLines(records) {
+  return records.flatMap((record) => {
+    if (!record.attendanceSections?.length) return [];
+    return record.attendanceSections
+      .filter((section) => {
+        if (shouldAuditCarAndClockSeparately(record.dateKey)) return !!section.calendarText && !section.calendarText.endsWith(`：${ATTENDANCE_STATUS.NORMAL.long}`);
+        return section.statuses.length > 0;
+      })
+      .map((section) => ({
+        range: shortRangeLabel(record.start, record.end, record.startRaw, record.endRaw),
+        label: section.calendarText,
+        tone: section.calendarTone || "warn",
+      }));
+  });
+}
+
+function buildRecordEvidenceItems(record) {
+  const items = [];
+  (record.attendanceSections || []).forEach((section) => {
+    if (section.entry) items.push(`${section.title}起始 ${formatDateTime(section.entry.time)}（${section.entry.sourceLabel}）`);
+    if (section.exit) items.push(`${section.title}結束 ${formatDateTime(section.exit.time)}（${section.exit.sourceLabel}）`);
+    if (!section.entry && !section.exit && section.calendarText?.includes("無汽車進出紀錄")) {
+      items.push(`${section.title}：無汽車進出紀錄`);
+    }
+  });
+  if (!items.length && record.normalAttendanceText) items.push(record.normalAttendanceText);
+  return items.length ? items : ["無額外佐證"];
+}
+
+function buildRecordIssueItems(record) {
+  const details = (record.attendanceDetails || []).filter((item) => !/^出勤狀況：正常/.test(item));
+  const workDetails = (record.workRiskDetails || []).filter(Boolean);
+  return [...details, ...workDetails];
+}
+
+function shortRangeLabel(start, end, startRaw = "", endRaw = "") {
+  if (start && end) return `${formatCalendarTime(start, start)}-${formatCalendarTime(end, start)}`;
+  if (startRaw || endRaw) return `${cleanText(startRaw)}-${cleanText(endRaw)}`.replace(/^-|-$/g, "");
+  return "本筆";
 }
 
 function getField(row, names) {
@@ -1343,9 +1809,11 @@ function formatDateTime(date) {
   return `${formatDateKey(date)} ${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
 }
 
-function formatTimeOnly(date) {
+function formatCalendarTime(date, baseDate) {
   if (!date) return "";
-  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+  const sameDay = baseDate && formatDateKey(date) === formatDateKey(baseDate);
+  if (sameDay) return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+  return `${String(date.getMonth() + 1).padStart(2, "0")}/${String(date.getDate()).padStart(2, "0")} ${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
 }
 
 function formatRange(start, end, startRaw, endRaw) {
@@ -1355,7 +1823,7 @@ function formatRange(start, end, startRaw, endRaw) {
 
 function formatAttendanceEvent(event) {
   const label = event.direction === "entry" ? "進" : "出";
-  return `${label} ${formatTimeOnly(event.time)} ${event.sourceLabel}`;
+  return `${label} ${formatDateTime(event.time)} ${event.sourceLabel}`;
 }
 
 function addDays(date, days) {
@@ -1384,6 +1852,10 @@ function earliestTime(values) {
 function latestTime(values) {
   const items = values.filter(Boolean);
   return items.length ? items.sort((a, b) => b - a)[0] : null;
+}
+
+function mergeDateArrays(left, right) {
+  return uniqueBy([...(left || []), ...(right || [])], (item) => item.getTime()).sort((a, b) => a - b);
 }
 
 function dailyKey(person, dateKey) {

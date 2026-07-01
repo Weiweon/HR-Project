@@ -251,10 +251,15 @@ select:disabled {
 
 .weekday-row {
   border-bottom: 1px solid var(--line);
-  background: var(--surface-2);
-  color: var(--muted);
+  background: #a5b8cd;
+  color: #fff;
   font-size: 12px;
   font-weight: 700;
+}
+
+.weekday-row span:first-child,
+.weekday-row span:last-child {
+  background: #6788ae;
 }
 
 .weekday-row span {
@@ -263,19 +268,22 @@ select:disabled {
 }
 
 .calendar-grid {
-  min-height: 520px;
+  min-height: 640px;
   background: var(--line);
   gap: 1px;
 }
 
 .day-cell {
-  min-height: 128px;
+  min-height: 180px;
   padding: 10px;
   border: 0;
   background: #fff;
   color: var(--ink);
   text-align: left;
   cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
 }
 
 .day-cell:hover,
@@ -285,20 +293,78 @@ select:disabled {
 }
 
 .day-cell.outside {
-  background: #f5f6f4;
+  background: #ecefee;
   color: #9aa29d;
+}
+
+.day-cell.outside .day-top {
+  background: #d9dedd;
+  border-bottom-color: #d0d5d4;
+}
+
+.day-cell.type-workday {
+  background: #ffffff;
+}
+
+.day-cell.type-restday {
+  background: #ffffff;
+}
+
+.day-cell.type-holiday {
+  background: #ffffff;
+}
+
+.day-cell.type-fixed-holiday {
+  background: #ffffff;
+}
+
+.day-cell.type-special {
+  background: #ffffff;
 }
 
 .day-top {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 6px;
-  margin-bottom: 8px;
+  margin: -12px -12px 10px;
+  padding: 6px 8px;
+  background: #a5b8cd;
+  border-bottom: 1px solid #bfcadb;
+  min-height: 34px;
+  flex: 0 0 34px;
+}
+
+.day-cell.type-workday .day-top {
+  background: #a5b8cd;
+}
+
+.day-cell.type-restday .day-top,
+.day-cell.type-fixed-holiday .day-top {
+  background: #6788ae;
+}
+
+.day-cell.type-holiday .day-top {
+  background: #6788ae;
+}
+
+.day-cell.type-special .day-top {
+  background: #95acbf;
+}
+
+.day-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
 }
 
 .day-number {
   font-weight: 800;
+  color: #ffffff;
+  font-size: 13px;
+  display: inline-block;
+  min-width: 26px;
 }
 
 .badge {
@@ -324,36 +390,147 @@ select:disabled {
   color: var(--danger);
 }
 
-.day-lines {
+.badge.attendance.ok {
+  background: #e7f6ec;
+  color: var(--ok);
+}
+
+.badge.work {
+  background: #efe7ff;
+  color: #61369c;
+}
+
+.badge.work.holiday-work {
+  background: #fde6e6;
+  color: #b63a3a;
+}
+
+.day-content {
   display: grid;
-  gap: 5px;
+  gap: 6px;
+  align-content: start;
+  flex: 1 1 auto;
+}
+
+.day-shift,
+.day-line {
   font-size: 12px;
   line-height: 1.35;
+  word-break: break-word;
 }
 
-.day-lines span {
+.day-shift {
+  color: #5d6b7d;
+  font-weight: 700;
+}
+
+.day-shift-inline {
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
-.risk-preview {
+.day-line.metric {
+  font-weight: 700;
+  padding: 0;
+  border-radius: 0;
+  border: 0;
+  font-size: 11.5px;
+}
+
+.day-line.metric-hours {
+  color: #214f82;
+}
+
+.day-line.metric-pay {
+  color: #8a4a02;
+}
+
+.day-line.attendance {
+  font-weight: 700;
+}
+
+.day-line.attendance.issue {
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+.day-issue-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.day-issue-range {
+  font-size: 11px;
+  color: #1f2937;
+  font-weight: 600;
+}
+
+.day-pill-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
-  margin-top: 8px;
+  gap: 6px;
 }
 
-.mini-risk {
+.day-pill {
   display: inline-flex;
   align-items: center;
-  min-height: 20px;
-  padding: 0 6px;
+  min-height: 24px;
+  padding: 0 10px;
   border-radius: 999px;
-  background: var(--danger-soft);
-  color: var(--danger);
   font-size: 11px;
   font-weight: 700;
+}
+
+.day-pill.attendance.ok {
+  background: #d4f4da;
+  color: #0d8a4e;
+}
+
+.day-pill.attendance.warn {
+  background: #d4f4da;
+  color: #0d8a4e;
+}
+
+.day-pill.attendance.danger {
+  background: #d6eef1;
+  color: #2b7d86;
+}
+
+.day-line.attendance.ok {
+  color: var(--ok);
+}
+
+.day-line.attendance.warn {
+  color: var(--warn);
+}
+
+.day-line.attendance.danger {
+  color: var(--danger);
+}
+
+.day-line.work-risk {
+  color: #6d2fa0;
+  font-weight: 700;
+}
+
+.day-pill.work-risk {
+  background: #efe7ff;
+  color: #7a55bf;
+}
+
+.day-pill.work-risk.holiday-work {
+  background: #fde6e6;
+  color: #b63a3a;
+}
+
+.day-line.note {
+  color: var(--muted);
 }
 
 .detail-body {
@@ -383,6 +560,16 @@ select:disabled {
   color: var(--muted);
 }
 
+.detail-section {
+  display: grid;
+  gap: 8px;
+}
+
+.detail-section h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
 .risk-list {
   display: flex;
   flex-wrap: wrap;
@@ -394,6 +581,25 @@ select:disabled {
   word-break: break-word;
 }
 
+.detail-notes {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.note-list {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.note-list li + li {
+  margin-top: 4px;
+}
+
+.empty-note {
+  color: var(--muted);
+}
+
 .record-list {
   display: grid;
   gap: 10px;
@@ -402,17 +608,68 @@ select:disabled {
 .record-item {
   border: 1px solid var(--line);
   border-radius: 8px;
-  padding: 10px;
+  padding: 12px;
   background: #fbfcfb;
+}
+
+.record-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 4px;
 }
 
 .record-item strong {
   display: block;
-  margin-bottom: 5px;
+  margin-bottom: 0;
+}
+
+.record-hours {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
 }
 
 .record-item p {
-  margin-bottom: 4px;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.record-reason {
+  color: var(--ink) !important;
+}
+
+.record-bullets,
+.record-list-compact {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.record-bullets {
+  display: grid;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.record-mini-section {
+  margin-top: 8px;
+}
+
+.record-mini-section h4 {
+  margin: 0 0 4px;
+  font-size: 12px;
+  color: var(--ink);
+}
+
+.record-list-compact {
+  display: grid;
+  gap: 4px;
   color: var(--muted);
   font-size: 13px;
   line-height: 1.45;
@@ -455,6 +712,30 @@ td:last-child {
   max-width: 360px;
 }
 
+.risk-summary {
+  display: grid;
+  gap: 6px;
+}
+
+.risk-summary-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.risk-time {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.risk-note {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 @media (max-width: 1100px) {
   .toolbar {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -490,11 +771,12 @@ td:last-child {
   }
 
   .day-cell {
-    min-height: 108px;
+    min-height: 148px;
     padding: 8px;
   }
 
-  .day-lines {
+  .day-shift,
+  .day-line {
     font-size: 11px;
   }
 }
