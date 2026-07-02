@@ -81,8 +81,8 @@ function cacheDom() {
     "fileStatus",
     "metricHours",
     "metricPay",
-    "metricRiskDays",
-    "metricMonthRisk",
+    "metricAttendanceRiskDays",
+    "metricWorkRiskDays",
     "calendarTitle",
     "calendarSubtitle",
     "calendarGrid",
@@ -1123,13 +1123,21 @@ function getFilteredRecords() {
 function renderMetrics(dailyRows, records) {
   const totalHours = sum(records.map((record) => record.hours));
   const totalPay = sum(records.map((record) => record.estimatedPay));
-  const riskDays = dailyRows.filter((daily) => daily.risks.length > 0).length;
-  const over46People = unique(records.filter((record) => (record.monthlyCumulative || 0) > 46).map((record) => record.person)).length;
+  const attendanceRiskDays = unique(
+    dailyRows
+      .filter((daily) => daily.attendanceStatuses.length > 0)
+      .map((daily) => daily.dateKey),
+  ).length;
+  const workRiskDays = unique(
+    dailyRows
+      .filter((daily) => daily.workRisks.some((risk) => risk !== WORK_RISK.PENDING_REVIEW))
+      .map((daily) => daily.dateKey),
+  ).length;
 
   dom.metricHours.textContent = formatNumber(totalHours, 1);
   dom.metricPay.textContent = currency(totalPay);
-  dom.metricRiskDays.textContent = `${riskDays}`;
-  dom.metricMonthRisk.textContent = `${over46People} 人`;
+  dom.metricAttendanceRiskDays.textContent = `${attendanceRiskDays}`;
+  dom.metricWorkRiskDays.textContent = `${workRiskDays}`;
 }
 
 function renderCalendar(dailyRows) {
@@ -1211,7 +1219,7 @@ function dayLineHtml(text, kind = "") {
 
 function dayIssueHtml(line) {
   const range = line.range ? `<span class="day-issue-range">${escapeHtml(line.range)}</span>` : "";
-  const pill = dayPillHtml(line.label, `attendance ${line.tone}`);
+  const pill = dayPillHtml(line.label, attendancePillClass(line.status));
   return `<div class="day-issue-line">${range}${pill}</div>`;
 }
 
@@ -1221,6 +1229,17 @@ function dayPillHtml(text, kind = "") {
 
 function riskPillClass(risk) {
   return risk === WORK_RISK.HOLIDAY_WORK ? "work-risk holiday-work" : "work-risk";
+}
+
+function attendanceStatusClass(status) {
+  if ([ATTENDANCE_STATUS.MISSING_SIGN_IN.short, ATTENDANCE_STATUS.MISSING_SIGN_OUT.short].includes(status)) return "missing";
+  if (status === ATTENDANCE_STATUS.EARLY_LEAVE.short) return "early";
+  if (status === ATTENDANCE_STATUS.LATE_OVERTIME.short) return "late";
+  return "ok";
+}
+
+function attendancePillClass(status) {
+  return `attendance ${attendanceStatusClass(status)}`;
 }
 
 function renderDetail(dailyRows) {
@@ -1247,7 +1266,7 @@ function renderDetail(dailyRows) {
     (event) => `${event.person}|${event.direction}|${event.sourceLabel}|${event.time.getTime()}`,
   ).sort((a, b) => a.time - b.time);
   const attendanceBadges = attendanceStatuses.length
-    ? attendanceStatuses.map((status) => statusBadgeHtml(statusDisplayLabel(status), "attendance")).join("")
+    ? attendanceStatuses.map((status) => statusBadgeHtml(statusDisplayLabel(status), attendancePillClass(status))).join("")
     : records.length
       ? statusBadgeHtml(ATTENDANCE_STATUS.NORMAL.long, "attendance ok")
       : '<span class="badge">無加班申請</span>';
@@ -1279,15 +1298,7 @@ function renderDetail(dailyRows) {
 }
 
 function recordHtml(record) {
-  const segments = record.segments
-    .filter((segment) => segment.hours > 0 || segment.paidHours > 0)
-    .map((segment) => {
-      const hoursText = segment.paidHours && segment.paidHours !== segment.hours
-        ? `${formatNumber(segment.hours, 1)}h（計 ${formatNumber(segment.paidHours, 1)}h）`
-        : `${formatNumber(segment.hours, 1)}h`;
-      return `${segment.label} ${hoursText}`;
-    })
-    .join("、");
+  const segments = formatRecordSegmentSummary(record);
 
   const attendanceLabel = record.attendanceStatuses.length
     ? record.attendanceStatuses.map(statusLongLabel).join("、")
@@ -1322,6 +1333,48 @@ function recordHtml(record) {
   `;
 }
 
+function formatRecordSegmentSummary(record) {
+  const displaySegments = buildDisplaySegments(record);
+  if (!displaySegments.length) return "無倍率拆段";
+  return displaySegments.map((segment) => {
+    const multiplierText = formatDisplayMultiplier(segment.multiplier);
+    const taxedText = segment.taxed ? "(含稅)" : "";
+    return `${multiplierText}倍${taxedText} ${formatNumber(segment.hours, 1)}H`;
+  }).join(" + ");
+}
+
+function buildDisplaySegments(record) {
+  const hours = Math.max(0, Number(record.hours) || 0);
+  if (!hours) return [];
+
+  if (record.type === DAY_TYPE.WORKDAY) {
+    const firstBlock = Math.min(hours, 2);
+    const secondBlock = Math.min(Math.max(hours - 2, 0), 2);
+    const thirdBlock = Math.max(hours - 4, 0);
+    return [
+      firstBlock > 0 ? { multiplier: 1.34, hours: firstBlock, taxed: false } : null,
+      secondBlock > 0 ? { multiplier: 1.67, hours: secondBlock, taxed: false } : null,
+      thirdBlock > 0 ? { multiplier: 1.67, hours: thirdBlock, taxed: true } : null,
+    ].filter(Boolean);
+  }
+
+  return (record.segments || [])
+    .filter((segment) => segment.hours > 0 || segment.paidHours > 0)
+    .map((segment) => ({
+      multiplier: segment.multiplier,
+      hours: segment.paidHours && segment.paidHours !== segment.hours ? segment.paidHours : segment.hours,
+      taxed: /13H\+/.test(segment.label || ""),
+    }));
+}
+
+function formatDisplayMultiplier(multiplier) {
+  const rounded = Number(multiplier) || 0;
+  if (rounded === 1.34) return "1.334";
+  if (rounded === 1.67) return "1.667";
+  if (rounded === 2.67) return "2.667";
+  return formatNumber(rounded, 3);
+}
+
 function renderRiskTable(dailyRows) {
   const riskRows = dailyRows.filter((daily) => daily.risks.length > 0);
   dom.riskSubtitle.textContent = `${riskRows.length} 筆日期需覆核`;
@@ -1343,23 +1396,30 @@ function renderRiskTable(dailyRows) {
 }
 
 function renderRiskSummaryCell(daily) {
-  const issueLines = buildDayRecordIssueLines(daily.overtimeRecords || []);
-  const workRiskPills = daily.workRisks
-    .filter((risk) => risk !== WORK_RISK.PENDING_REVIEW)
-    .map((risk) => dayPillHtml(risk, riskPillClass(risk)))
-    .join("");
-  const noteLines = (daily.calendarNotes || []).map((note) => `<div class="risk-note">${escapeHtml(note)}</div>`).join("");
+  const attendanceBlocks = buildRiskSummaryAttendanceBlocks(daily.overtimeRecords || []);
+  const workBlocks = buildRiskSummaryWorkBlocks(daily);
 
   return `
     <div class="risk-summary">
-      ${issueLines.map((line) => `
-        <div class="risk-summary-line">
-          <span class="risk-time">${escapeHtml(line.range || "")}</span>
-          ${dayPillHtml(line.label, `attendance ${line.tone}`)}
+      ${attendanceBlocks.map((block) => `
+        <div class="risk-summary-block">
+          <div class="risk-block-title">●加班起訖 ${escapeHtml(block.range)}</div>
+          ${block.items.map((item) => `
+            <div class="risk-summary-line">
+              <span class="risk-note">${escapeHtml(item.text)}</span>
+              ${dayPillHtml(item.label, attendancePillClass(item.status))}
+            </div>
+          `).join("")}
         </div>
       `).join("")}
-      ${workRiskPills ? `<div class="day-pill-row">${workRiskPills}</div>` : ""}
-      ${noteLines}
+      ${workBlocks.map((item) => `
+        <div class="risk-summary-block">
+          <div class="risk-summary-line">
+            ${dayPillHtml(item.label, riskPillClass(item.label))}
+            ${item.note ? `<span class="risk-note">${escapeHtml(item.note)}</span>` : ""}
+          </div>
+        </div>
+      `).join("")}
     </div>
   `;
 }
@@ -1567,10 +1627,11 @@ function dayTypeClass(type) {
 }
 
 function attendanceClass(statuses) {
-  if (statuses.some((status) => [ATTENDANCE_STATUS.MISSING_SIGN_IN.short, ATTENDANCE_STATUS.MISSING_SIGN_OUT.short, ATTENDANCE_STATUS.EARLY_LEAVE.short].includes(status))) {
-    return "danger";
+  if (statuses.some((status) => [ATTENDANCE_STATUS.MISSING_SIGN_IN.short, ATTENDANCE_STATUS.MISSING_SIGN_OUT.short].includes(status))) {
+    return "missing";
   }
-  if (statuses.includes(ATTENDANCE_STATUS.LATE_OVERTIME.short)) return "warn";
+  if (statuses.includes(ATTENDANCE_STATUS.EARLY_LEAVE.short)) return "early";
+  if (statuses.includes(ATTENDANCE_STATUS.LATE_OVERTIME.short)) return "late";
   return "ok";
 }
 
@@ -1602,15 +1663,73 @@ function buildDayRecordIssueLines(records) {
     if (!record.attendanceSections?.length) return [];
     return record.attendanceSections
       .filter((section) => {
-        if (shouldAuditCarAndClockSeparately(record.dateKey)) return !!section.calendarText && !section.calendarText.endsWith(`：${ATTENDANCE_STATUS.NORMAL.long}`);
+        if (shouldAuditCarAndClockSeparately(record.dateKey)) return section.statuses.length > 0;
         return section.statuses.length > 0;
       })
-      .map((section) => ({
+      .flatMap((section) => section.statuses.map((status) => ({
         range: shortRangeLabel(record.start, record.end, record.startRaw, record.endRaw),
-        label: section.calendarText,
-        tone: section.calendarTone || "warn",
-      }));
+        label: statusDisplayLabel(status),
+        status,
+      })));
   });
+}
+
+function buildRiskSummaryAttendanceBlocks(records) {
+  return records
+    .map((record) => {
+      const items = (record.attendanceSections || []).flatMap((section) => (
+        section.statuses.map((status) => ({
+          status,
+          label: statusDisplayLabel(status),
+          text: buildAttendanceSummaryText(record, section, status),
+        }))
+      ));
+
+      if (!items.length) return null;
+      return {
+        range: shortRangeLabel(record.start, record.end, record.startRaw, record.endRaw),
+        items,
+      };
+    })
+    .filter(Boolean);
+}
+
+function buildAttendanceSummaryText(record, section, status) {
+  const sourceSuffix = shouldAuditCarAndClockSeparately(record.dateKey) ? `（${section.title}）` : "";
+
+  if (status === ATTENDANCE_STATUS.LATE_OVERTIME.short) {
+    const source = section.entry?.sourceLabel ? `（${section.entry.sourceLabel}）` : sourceSuffix;
+    return `${ATTENDANCE_STATUS.LATE_OVERTIME.long}：實際簽到採認紀錄為 ${formatDateTime(section.entry?.time)}${source}`;
+  }
+
+  if (status === ATTENDANCE_STATUS.EARLY_LEAVE.short) {
+    const source = section.exit?.sourceLabel ? `（${section.exit.sourceLabel}）` : sourceSuffix;
+    return `${ATTENDANCE_STATUS.EARLY_LEAVE.long}：最晚離院/簽退採認紀錄為 ${formatDateTime(section.exit?.time)}${source}`;
+  }
+
+  if (status === ATTENDANCE_STATUS.MISSING_SIGN_IN.short) {
+    return `${ATTENDANCE_STATUS.MISSING_SIGN_IN.long}：${formatDateTime(record.start)} 起未找到可佐證開始加班的紀錄${sourceSuffix}`;
+  }
+
+  if (status === ATTENDANCE_STATUS.MISSING_SIGN_OUT.short) {
+    return `${ATTENDANCE_STATUS.MISSING_SIGN_OUT.long}：${formatDateTime(record.end)} 前後未找到可佐證結束加班的紀錄${sourceSuffix}`;
+  }
+
+  return `${statusDisplayLabel(status)}${sourceSuffix}`;
+}
+
+function buildRiskSummaryWorkBlocks(daily) {
+  const noteMap = new Map();
+  (daily.calendarNotes || []).forEach((note) => {
+    if (daily.workRisks.includes(WORK_RISK.REST_LESS_11)) {
+      noteMap.set(WORK_RISK.REST_LESS_11, note);
+    }
+  });
+
+  return unique(daily.workRisks.filter((risk) => risk !== WORK_RISK.PENDING_REVIEW)).map((risk) => ({
+    label: risk,
+    note: noteMap.get(risk) || "",
+  }));
 }
 
 function buildRecordEvidenceItems(record) {

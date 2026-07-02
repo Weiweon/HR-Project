@@ -395,6 +395,21 @@ select:disabled {
   color: var(--ok);
 }
 
+.badge.attendance.late {
+  background: #e5f0ff;
+  color: #2f62b8;
+}
+
+.badge.attendance.early {
+  background: #dff6e5;
+  color: #23834d;
+}
+
+.badge.attendance.missing {
+  background: #fff4c9;
+  color: #9a6a00;
+}
+
 .badge.work {
   background: #efe7ff;
   color: #61369c;
@@ -492,26 +507,35 @@ select:disabled {
   color: #0d8a4e;
 }
 
-.day-pill.attendance.warn {
-  background: #d4f4da;
-  color: #0d8a4e;
+.day-pill.attendance.late {
+  background: #e5f0ff;
+  color: #2f62b8;
 }
 
-.day-pill.attendance.danger {
-  background: #d6eef1;
-  color: #2b7d86;
+.day-pill.attendance.early {
+  background: #dff6e5;
+  color: #23834d;
+}
+
+.day-pill.attendance.missing {
+  background: #fff4c9;
+  color: #9a6a00;
 }
 
 .day-line.attendance.ok {
   color: var(--ok);
 }
 
-.day-line.attendance.warn {
-  color: var(--warn);
+.day-line.attendance.late {
+  color: #2f62b8;
 }
 
-.day-line.attendance.danger {
-  color: var(--danger);
+.day-line.attendance.early {
+  color: #23834d;
+}
+
+.day-line.attendance.missing {
+  color: #9a6a00;
 }
 
 .day-line.work-risk {
@@ -714,12 +738,23 @@ td:last-child {
 
 .risk-summary {
   display: grid;
+  gap: 8px;
+}
+
+.risk-summary-block {
+  display: grid;
   gap: 6px;
+}
+
+.risk-block-title {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .risk-summary-line {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
   flex-wrap: wrap;
 }
