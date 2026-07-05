@@ -746,123 +746,103 @@ function evaluateAttendanceRecord(app, personEvents) {
     return { statuses: [], details: [], entry: null, exit: null, sections: [] };
   }
 
-  const sections = shouldAuditCarAndClockSeparately(app.dateKey)
-    ? [
-      evaluateAttendanceSection(app, personEvents, {
-        key: "car",
-        title: "汽車進出",
-        sourceGroups: ["car"],
-        auditChannels: ["car"],
-        showNormalInCalendar: true,
-        missingSourceLabel: "無汽車進出紀錄",
-      }),
-      evaluateAttendanceSection(app, personEvents, {
-        key: "clock",
-        title: "簽到退",
-        sourceGroups: ["schedule", "application"],
-        auditChannels: ["clock"],
-        showNormalInCalendar: true,
-      }),
-    ]
-    : [
-      evaluateAttendanceSection(app, personEvents, {
-        key: "clock",
-        title: "簽到退",
-        sourceGroups: ["schedule", "application"],
-        auditChannels: ["clock"],
-        showNormalInCalendar: false,
-      }),
-    ];
-
-  const activeSections = sections.filter(Boolean);
-  const statuses = unique(activeSections.flatMap((section) => section.statuses));
-  const details = unique(activeSections.flatMap((section) => section.details));
-  const primarySection = activeSections.find((section) => section.key === "car" && section.hasEvidence)
-    || activeSections.find((section) => section.key === "clock" && section.hasEvidence)
-    || activeSections[0]
-    || null;
+  const section = evaluateAttendanceSection(app, personEvents);
 
   return {
-    statuses,
-    details,
-    entry: primarySection?.entry || null,
-    exit: primarySection?.exit || null,
-    sections: activeSections,
+    statuses: section.statuses,
+    details: section.details,
+    entry: section.entry || null,
+    exit: section.exit || null,
+    sections: [section],
   };
 }
 
-function evaluateAttendanceSection(app, personEvents, options) {
+function evaluateAttendanceSection(app, personEvents) {
   const windowStart = addHours(app.start, -ENTRY_LOOKBACK_HOURS);
   const windowEnd = addHours(app.end, EXIT_LOOKAHEAD_HOURS);
-  const scopedEvents = personEvents.filter((event) => (
-    options.sourceGroups.includes(event.sourceGroup)
-    && options.auditChannels.includes(event.auditChannel)
-    && event.time >= windowStart
-    && event.time <= windowEnd
-  ));
-  const entryEvents = scopedEvents.filter((event) => event.direction === "entry");
-  const exitEvents = scopedEvents.filter((event) => event.direction === "exit");
-
-  if (options.missingSourceLabel && entryEvents.length === 0 && exitEvents.length === 0) {
-    return {
-      key: options.key,
-      title: options.title,
-      statuses: [],
-      details: [`${options.title}出勤狀況：${options.missingSourceLabel}。`],
-      entry: null,
-      exit: null,
-      calendarText: `${options.title}：${options.missingSourceLabel}`,
-      calendarTone: "warn",
-      hasEvidence: false,
-    };
-  }
-
+  const scopedEvents = personEvents.filter((event) => event.time >= windowStart && event.time <= windowEnd);
   const statuses = [];
   const details = [];
-  const entry = pickEntryCandidate(entryEvents, exitEvents, app.start, app.end, options.sourceGroups);
-  const exitEvidence = pickExitEvidence(exitEvents, entry?.time || app.start, app.end, options.sourceGroups);
+  const entrySource = pickAttendanceSource(scopedEvents, "entry", app.start, app.end);
+  const exitSource = pickAttendanceSource(scopedEvents, "exit", app.start, app.end);
+  const entryEvents = scopedEvents.filter((event) => event.direction === "entry" && event.sourceGroup === entrySource);
+  const exitEvents = scopedEvents.filter((event) => event.direction === "exit" && event.sourceGroup === exitSource);
+  const entry = pickEntryCandidate(entryEvents, exitEvents, app.start, app.end, entrySource ? [entrySource] : []);
+  const exitEvidence = pickExitEvidence(
+    exitEvents,
+    entryEvents,
+    entry?.time || app.start,
+    app.end,
+    exitSource ? [exitSource] : [],
+  );
   const exit = exitEvidence.outcome === "matched" ? exitEvidence.event : null;
   const earlyExit = exitEvidence.outcome === "early" ? exitEvidence.event : null;
+  const mergedMissing = !entry && !exit && !earlyExit;
 
-  if (!entry) {
+  if (mergedMissing) {
+    statuses.push(ATTENDANCE_STATUS.MISSING_SIGN_IN.short, ATTENDANCE_STATUS.MISSING_SIGN_OUT.short);
+    details.push(`${formatDateTime(app.start)} 起至 ${formatDateTime(app.end)} 前後未找到可佐證開始或結束加班的紀錄。`);
+  } else if (!entry) {
     statuses.push(ATTENDANCE_STATUS.MISSING_SIGN_IN.short);
-    details.push(`${options.title}｜${ATTENDANCE_STATUS.MISSING_SIGN_IN.long}：${formatDateTime(app.start)} 起未找到可佐證開始加班的紀錄。`);
+    details.push(`${ATTENDANCE_STATUS.MISSING_SIGN_IN.long}：${formatDateTime(app.start)} 起未找到可佐證開始加班的紀錄。`);
   }
 
   if (entry && entry.time > app.start) {
     statuses.push(ATTENDANCE_STATUS.LATE_OVERTIME.short);
     details.push(
-      `${options.title}｜${ATTENDANCE_STATUS.LATE_OVERTIME.long}：加班起始 ${formatDateTime(app.start)}，實際採認開始紀錄為 ${formatDateTime(entry.time)}（${entry.sourceLabel}）。`,
+      `${ATTENDANCE_STATUS.LATE_OVERTIME.long}：加班起始 ${formatDateTime(app.start)}，實際採認開始紀錄為 ${formatDateTime(entry.time)}（${entry.sourceLabel}）。`,
     );
   }
 
   if (exit) {
-    details.push(`${options.title}佐證：加班結束以 ${formatDateTime(exit.time)}（${exit.sourceLabel}）採認。`);
+    details.push(`加班結束以 ${formatDateTime(exit.time)}（${exit.sourceLabel}）採認。`);
   } else if (earlyExit) {
     statuses.push(ATTENDANCE_STATUS.EARLY_LEAVE.short);
     details.push(
-      `${options.title}｜${ATTENDANCE_STATUS.EARLY_LEAVE.long}：加班預計至 ${formatDateTime(app.end)}，最晚離院/簽退為 ${formatDateTime(earlyExit.time)}（${earlyExit.sourceLabel}）。`,
+      `${ATTENDANCE_STATUS.EARLY_LEAVE.long}：加班預計至 ${formatDateTime(app.end)}，最晚離院/簽退為 ${formatDateTime(earlyExit.time)}（${earlyExit.sourceLabel}）。`,
     );
-  } else {
+  } else if (!mergedMissing) {
     statuses.push(ATTENDANCE_STATUS.MISSING_SIGN_OUT.short);
-    details.push(`${options.title}｜${ATTENDANCE_STATUS.MISSING_SIGN_OUT.long}：${formatDateTime(app.end)} 前後未找到可佐證結束加班的紀錄。`);
+    details.push(`${ATTENDANCE_STATUS.MISSING_SIGN_OUT.long}：${formatDateTime(app.end)} 前後未找到可佐證結束加班的紀錄。`);
   }
 
   if (!statuses.length) {
-    details.unshift(`${options.title}出勤狀況：${ATTENDANCE_STATUS.NORMAL.long}。`);
+    details.unshift(`出勤狀況：${ATTENDANCE_STATUS.NORMAL.long}。`);
   }
 
   return {
-    key: options.key,
-    title: options.title,
+    key: "final",
+    title: "出勤佐證",
     statuses: unique(statuses),
     details: unique(details),
     entry,
     exit: exit || earlyExit || null,
-    calendarText: buildAttendanceSectionCalendarText(options.title, unique(statuses), options.showNormalInCalendar),
+    calendarText: buildAttendanceSectionCalendarText("出勤", unique(statuses), false),
     calendarTone: attendanceClass(unique(statuses)),
-    hasEvidence: entryEvents.length > 0 || exitEvents.length > 0,
+    hasEvidence: Boolean(entrySource || exitSource),
+    entrySource,
+    exitSource,
+    mergedMissing,
   };
+}
+
+function pickAttendanceSource(events, direction, start, end) {
+  for (const sourceGroup of ATTENDANCE_SOURCE_PRIORITY) {
+    const scopedEvents = events.filter((event) => event.direction === direction && event.sourceGroup === sourceGroup);
+    if (!scopedEvents.length) continue;
+
+    if (direction === "entry") {
+      const hasCandidate = scopedEvents.some((event) => event.time <= addMinutes(end, TOLERANCE_MINUTES));
+      if (hasCandidate) return sourceGroup;
+      continue;
+    }
+
+    if (direction === "exit") {
+      const hasCandidate = scopedEvents.some((event) => event.time >= addMinutes(start, -TOLERANCE_MINUTES));
+      if (hasCandidate) return sourceGroup;
+    }
+  }
+  return "";
 }
 
 function pickEntryCandidate(events, exitEvents, start, end, priorityGroups = ATTENDANCE_SOURCE_PRIORITY) {
@@ -885,9 +865,16 @@ function pickEntryCandidate(events, exitEvents, start, end, priorityGroups = ATT
   return null;
 }
 
-function pickExitCandidate(events, end) {
+function pickExitCandidate(events, siblingEntryEvents, end) {
+  const nextEntryAfterEnd = siblingEntryEvents
+    .filter((event) => event.time > addMinutes(end, TOLERANCE_MINUTES))
+    .sort((a, b) => a.time - b.time)[0] || null;
+
   return events
-    .filter((event) => event.time >= addMinutes(end, -TOLERANCE_MINUTES) && event.time <= addHours(end, EXIT_LOOKAHEAD_HOURS))
+    .filter((event) => (
+      event.time >= addMinutes(end, -TOLERANCE_MINUTES)
+      && (!nextEntryAfterEnd || event.time <= nextEntryAfterEnd.time)
+    ))
     .sort((a, b) => a.time - b.time)[0] || null;
 }
 
@@ -897,12 +884,13 @@ function pickEarlyExitCandidate(events, start, end) {
     .sort((a, b) => b.time - a.time)[0] || null;
 }
 
-function pickExitEvidence(events, start, end, priorityGroups = ATTENDANCE_SOURCE_PRIORITY) {
+function pickExitEvidence(events, siblingEntryEvents, start, end, priorityGroups = ATTENDANCE_SOURCE_PRIORITY) {
   for (const sourceGroup of priorityGroups) {
     const scopedEvents = events.filter((event) => event.sourceGroup === sourceGroup);
+    const scopedEntryEvents = siblingEntryEvents.filter((event) => event.sourceGroup === sourceGroup);
     if (!scopedEvents.length) continue;
 
-    const matchedExit = pickExitCandidate(scopedEvents, end);
+    const matchedExit = pickExitCandidate(scopedEvents, scopedEntryEvents, end);
     if (matchedExit) return { outcome: "matched", event: matchedExit };
 
     const earlyExit = pickEarlyExitCandidate(scopedEvents, start, end);
@@ -1036,16 +1024,6 @@ function buildCalendarNotes(daily) {
 function buildRecordAttendanceCalendarLines(record) {
   if (!record.attendanceSections?.length) return [];
 
-  if (shouldAuditCarAndClockSeparately(record.dateKey)) {
-    return record.attendanceSections
-      .map((section) => (
-        section.calendarText
-          ? { text: section.calendarText, tone: section.calendarTone || "ok" }
-          : null
-      ))
-      .filter(Boolean);
-  }
-
   if (!record.attendanceStatuses.length) return [];
   return [{
     text: `簽到退：${record.attendanceStatuses.map(statusDisplayLabel).join("、")}`,
@@ -1057,10 +1035,6 @@ function buildAttendanceSectionCalendarText(title, statuses, showNormalInCalenda
   if (statuses.length) return `${title}：${statuses.map(statusDisplayLabel).join("、")}`;
   if (showNormalInCalendar) return `${title}：${ATTENDANCE_STATUS.NORMAL.long}`;
   return "";
-}
-
-function shouldAuditCarAndClockSeparately(dateKey) {
-  return dateKey <= CAR_AUDIT_CUTOFF_DATEKEY;
 }
 
 function addWorkRisk(target, risk, detail = "") {
@@ -1183,15 +1157,15 @@ function dayCellHtml(date, items, isOutside = false) {
   const overtimeHours = sum(items.map((item) => item.overtimeHours));
   const totalPay = sum(items.map((item) => item.estimatedPay));
   const attendanceLines = uniqueBy(items.flatMap((item) => item.attendanceCalendarLines || []), (line) => `${line.text}|${line.tone}`);
-  const anomalyLines = uniqueBy(items.flatMap((item) => buildDayRecordIssueLines(item.overtimeRecords || [])), (line) => `${line.range}|${line.label}|${line.tone}`);
+  const anomalyGroups = buildDayRecordIssueGroups(items.flatMap((item) => item.overtimeRecords || []));
   const workRisks = unique(items.flatMap((item) => item.workRisks.filter((risk) => risk !== WORK_RISK.PENDING_REVIEW)));
   const notes = unique(items.flatMap((item) => item.calendarNotes));
   const rows = [];
 
   if (overtimeHours > 0) rows.push(dayLineHtml(`⏱️延展工時 ${formatNumber(overtimeHours, 1)} h`, "metric metric-hours"));
   if (totalPay > 0) rows.push(dayLineHtml(`💰加班費${currency(totalPay)}`, "metric metric-pay"));
-  if (anomalyLines.length) {
-    anomalyLines.forEach((line) => rows.push(dayIssueHtml(line)));
+  if (anomalyGroups.length) {
+    anomalyGroups.forEach((group) => rows.push(dayIssueHtml(group)));
   } else {
     attendanceLines.forEach((line) => rows.push(dayLineHtml(line.text, `attendance ${line.tone}`)));
   }
@@ -1219,8 +1193,8 @@ function dayLineHtml(text, kind = "") {
 
 function dayIssueHtml(line) {
   const range = line.range ? `<span class="day-issue-range">${escapeHtml(line.range)}</span>` : "";
-  const pill = dayPillHtml(line.label, attendancePillClass(line.status));
-  return `<div class="day-issue-line">${range}${pill}</div>`;
+  const pills = (line.items || []).map((item) => dayPillHtml(item.label, attendancePillClass(item.status))).join("");
+  return `<div class="day-issue-line">${range}<span class="day-pill-row">${pills}</span></div>`;
 }
 
 function dayPillHtml(text, kind = "") {
@@ -1265,8 +1239,9 @@ function renderDetail(dailyRows) {
     items.flatMap((item) => item.attendanceEvents),
     (event) => `${event.person}|${event.direction}|${event.sourceLabel}|${event.time.getTime()}`,
   ).sort((a, b) => a.time - b.time);
+  const attendanceSummaryItems = records.flatMap((record) => buildAttendanceSummaryItems(record));
   const attendanceBadges = attendanceStatuses.length
-    ? attendanceStatuses.map((status) => statusBadgeHtml(statusDisplayLabel(status), attendancePillClass(status))).join("")
+    ? uniqueBy(attendanceSummaryItems, (item) => item.label).map((item) => statusBadgeHtml(item.label, attendancePillClass(item.status))).join("")
     : records.length
       ? statusBadgeHtml(ATTENDANCE_STATUS.NORMAL.long, "attendance ok")
       : '<span class="badge">無加班申請</span>';
@@ -1280,12 +1255,12 @@ function renderDetail(dailyRows) {
   dom.detailBody.innerHTML = `
     <div class="detail-stack">
       <div class="detail-row"><span>加班時數</span><strong>${formatNumber(totalHours, 1)} 小時</strong></div>
-      <div class="detail-row"><span>額外加班費</span><strong>${currency(totalPay)}</strong></div>
+      <div class="detail-row"><span>加班費</span><strong>${currency(totalPay)}</strong></div>
       <div class="detail-row"><span>當日紀錄</span><div class="timeline-text">${attendanceEvents.length ? attendanceEvents.map(formatAttendanceEvent).join("、") : "無"}</div></div>
       <section class="detail-section">
         <h3>出勤狀況</h3>
         <div class="risk-list">${attendanceBadges}</div>
-        <div class="detail-notes">${renderNoteList(unique(items.flatMap((item) => item.attendanceDetails)))}</div>
+        <div class="detail-notes">${renderNoteList(attendanceSummaryItems.length ? attendanceSummaryItems.map((item) => item.text) : ["正常"])}</div>
       </section>
       <section class="detail-section">
         <h3>延展工時異常</h3>
@@ -1299,9 +1274,10 @@ function renderDetail(dailyRows) {
 
 function recordHtml(record) {
   const segments = formatRecordSegmentSummary(record);
+  const attendanceSummaryItems = buildAttendanceSummaryItems(record);
 
-  const attendanceLabel = record.attendanceStatuses.length
-    ? record.attendanceStatuses.map(statusLongLabel).join("、")
+  const attendanceLabel = attendanceSummaryItems.length
+    ? attendanceSummaryItems.map((item) => item.label).join("、")
     : ATTENDANCE_STATUS.NORMAL.long;
   const workLabel = record.workRisks.filter((risk) => risk !== WORK_RISK.PENDING_REVIEW).join("、") || "無";
   const evidenceItems = buildRecordEvidenceItems(record);
@@ -1659,32 +1635,22 @@ function renderCompactList(items) {
 }
 
 function buildDayRecordIssueLines(records) {
-  return records.flatMap((record) => {
-    if (!record.attendanceSections?.length) return [];
-    return record.attendanceSections
-      .filter((section) => {
-        if (shouldAuditCarAndClockSeparately(record.dateKey)) return section.statuses.length > 0;
-        return section.statuses.length > 0;
-      })
-      .flatMap((section) => section.statuses.map((status) => ({
-        range: shortRangeLabel(record.start, record.end, record.startRaw, record.endRaw),
-        label: statusDisplayLabel(status),
-        status,
-      })));
-  });
+  return buildDayRecordIssueGroups(records).flatMap((group) => (
+    group.items.map((item) => ({
+      range: group.range,
+      label: item.label,
+      status: item.status,
+      tone: item.tone,
+    }))
+  ));
 }
 
-function buildRiskSummaryAttendanceBlocks(records) {
+function buildDayRecordIssueGroups(records) {
   return records
+    .slice()
+    .sort((left, right) => (left.start?.getTime() || 0) - (right.start?.getTime() || 0))
     .map((record) => {
-      const items = (record.attendanceSections || []).flatMap((section) => (
-        section.statuses.map((status) => ({
-          status,
-          label: statusDisplayLabel(status),
-          text: buildAttendanceSummaryText(record, section, status),
-        }))
-      ));
-
+      const items = buildAttendanceDisplayItems(record.attendanceStatuses || []);
       if (!items.length) return null;
       return {
         range: shortRangeLabel(record.start, record.end, record.startRaw, record.endRaw),
@@ -1694,28 +1660,105 @@ function buildRiskSummaryAttendanceBlocks(records) {
     .filter(Boolean);
 }
 
-function buildAttendanceSummaryText(record, section, status) {
-  const sourceSuffix = shouldAuditCarAndClockSeparately(record.dateKey) ? `（${section.title}）` : "";
+function buildRiskSummaryAttendanceBlocks(records) {
+  return records
+    .slice()
+    .sort((left, right) => (left.start?.getTime() || 0) - (right.start?.getTime() || 0))
+    .map((record) => {
+      const items = buildAttendanceSummaryItems(record);
+      if (!items.length) return null;
+      return {
+        range: shortRangeLabel(record.start, record.end, record.startRaw, record.endRaw),
+        items,
+      };
+    })
+    .filter(Boolean);
+}
 
-  if (status === ATTENDANCE_STATUS.LATE_OVERTIME.short) {
-    const source = section.entry?.sourceLabel ? `（${section.entry.sourceLabel}）` : sourceSuffix;
-    return `${ATTENDANCE_STATUS.LATE_OVERTIME.long}：實際簽到採認紀錄為 ${formatDateTime(section.entry?.time)}${source}`;
+function buildAttendanceDisplayItems(statuses) {
+  const uniqueStatuses = unique(statuses || []);
+  const hasMissingIn = uniqueStatuses.includes(ATTENDANCE_STATUS.MISSING_SIGN_IN.short);
+  const hasMissingOut = uniqueStatuses.includes(ATTENDANCE_STATUS.MISSING_SIGN_OUT.short);
+  const items = [];
+
+  if (hasMissingIn && hasMissingOut) {
+    items.push({
+      key: "missing-both",
+      label: "簽到、簽退無紀錄",
+      status: ATTENDANCE_STATUS.MISSING_SIGN_IN.short,
+      tone: "missing",
+      merged: true,
+    });
+  } else {
+    if (hasMissingIn) {
+      items.push({
+        key: ATTENDANCE_STATUS.MISSING_SIGN_IN.short,
+        label: statusDisplayLabel(ATTENDANCE_STATUS.MISSING_SIGN_IN.short),
+        status: ATTENDANCE_STATUS.MISSING_SIGN_IN.short,
+        tone: "missing",
+      });
+    }
+    if (hasMissingOut) {
+      items.push({
+        key: ATTENDANCE_STATUS.MISSING_SIGN_OUT.short,
+        label: statusDisplayLabel(ATTENDANCE_STATUS.MISSING_SIGN_OUT.short),
+        status: ATTENDANCE_STATUS.MISSING_SIGN_OUT.short,
+        tone: "missing",
+      });
+    }
   }
 
-  if (status === ATTENDANCE_STATUS.EARLY_LEAVE.short) {
-    const source = section.exit?.sourceLabel ? `（${section.exit.sourceLabel}）` : sourceSuffix;
-    return `${ATTENDANCE_STATUS.EARLY_LEAVE.long}：最晚離院/簽退採認紀錄為 ${formatDateTime(section.exit?.time)}${source}`;
+  if (uniqueStatuses.includes(ATTENDANCE_STATUS.LATE_OVERTIME.short)) {
+    items.push({
+      key: ATTENDANCE_STATUS.LATE_OVERTIME.short,
+      label: statusDisplayLabel(ATTENDANCE_STATUS.LATE_OVERTIME.short),
+      status: ATTENDANCE_STATUS.LATE_OVERTIME.short,
+      tone: "late",
+    });
   }
 
-  if (status === ATTENDANCE_STATUS.MISSING_SIGN_IN.short) {
-    return `${ATTENDANCE_STATUS.MISSING_SIGN_IN.long}：${formatDateTime(record.start)} 起未找到可佐證開始加班的紀錄${sourceSuffix}`;
+  if (uniqueStatuses.includes(ATTENDANCE_STATUS.EARLY_LEAVE.short)) {
+    items.push({
+      key: ATTENDANCE_STATUS.EARLY_LEAVE.short,
+      label: statusDisplayLabel(ATTENDANCE_STATUS.EARLY_LEAVE.short),
+      status: ATTENDANCE_STATUS.EARLY_LEAVE.short,
+      tone: "early",
+    });
   }
 
-  if (status === ATTENDANCE_STATUS.MISSING_SIGN_OUT.short) {
-    return `${ATTENDANCE_STATUS.MISSING_SIGN_OUT.long}：${formatDateTime(record.end)} 前後未找到可佐證結束加班的紀錄${sourceSuffix}`;
+  return items;
+}
+
+function buildAttendanceSummaryItems(record) {
+  const section = record.attendanceSections?.[0];
+  return buildAttendanceDisplayItems(record.attendanceStatuses || []).map((item) => ({
+    ...item,
+    text: buildAttendanceSummaryText(record, section, item),
+  }));
+}
+
+function buildAttendanceSummaryText(record, section, item) {
+  if (item.merged) {
+    return `簽到、簽退無紀錄：${formatDateTime(record.start)} 起至 ${formatDateTime(record.end)} 前後未找到可佐證開始或結束加班的紀錄`;
   }
 
-  return `${statusDisplayLabel(status)}${sourceSuffix}`;
+  if (item.status === ATTENDANCE_STATUS.LATE_OVERTIME.short) {
+    return `${ATTENDANCE_STATUS.LATE_OVERTIME.long}：實際簽到採認紀錄為 ${formatDateTime(section?.entry?.time)}${section?.entry?.sourceLabel ? `（${section.entry.sourceLabel}）` : ""}`;
+  }
+
+  if (item.status === ATTENDANCE_STATUS.EARLY_LEAVE.short) {
+    return `${ATTENDANCE_STATUS.EARLY_LEAVE.long}：實際簽退採認紀錄為 ${formatDateTime(section?.exit?.time)}${section?.exit?.sourceLabel ? `（${section.exit.sourceLabel}）` : ""}`;
+  }
+
+  if (item.status === ATTENDANCE_STATUS.MISSING_SIGN_IN.short) {
+    return `${ATTENDANCE_STATUS.MISSING_SIGN_IN.long}：${formatDateTime(record.start)} 起未找到可佐證開始加班的紀錄`;
+  }
+
+  if (item.status === ATTENDANCE_STATUS.MISSING_SIGN_OUT.short) {
+    return `${ATTENDANCE_STATUS.MISSING_SIGN_OUT.long}：${formatDateTime(record.end)} 前後未找到可佐證結束加班的紀錄`;
+  }
+
+  return item.label;
 }
 
 function buildRiskSummaryWorkBlocks(daily) {
@@ -1746,7 +1789,7 @@ function buildRecordEvidenceItems(record) {
 }
 
 function buildRecordIssueItems(record) {
-  const details = (record.attendanceDetails || []).filter((item) => !/^出勤狀況：正常/.test(item));
+  const details = buildAttendanceSummaryItems(record).map((item) => `${item.text} (${item.label})`);
   const workDetails = (record.workRiskDetails || []).filter(Boolean);
   return [...details, ...workDetails];
 }
