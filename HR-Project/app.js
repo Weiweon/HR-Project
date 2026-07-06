@@ -17,6 +17,17 @@ const ATTENDANCE_STATUS = {
   PENDING_REVIEW: { short: "待覆核", long: "差勤待覆核" },
 };
 
+const ATTENDANCE_MARKER = {
+  RETURN_AFTER_SIGNOUT: {
+    key: "return-after-signout",
+    label: "簽退後返回加班",
+  },
+  PROXY_CARD: {
+    key: "proxy-card",
+    label: "疑似代刷卡",
+  },
+};
+
 const WORK_RISK = {
   HOLIDAY_WORK: "例假日出勤",
   OVER_12_HOURS: "日總工時12小時以上",
@@ -32,6 +43,8 @@ const riskOptions = [
   [ATTENDANCE_STATUS.LATE_OVERTIME.short, ATTENDANCE_STATUS.LATE_OVERTIME.short],
   [ATTENDANCE_STATUS.MISSING_SIGN_IN.short, ATTENDANCE_STATUS.MISSING_SIGN_IN.short],
   [ATTENDANCE_STATUS.MISSING_SIGN_OUT.short, ATTENDANCE_STATUS.MISSING_SIGN_OUT.short],
+  [ATTENDANCE_MARKER.RETURN_AFTER_SIGNOUT.label, ATTENDANCE_MARKER.RETURN_AFTER_SIGNOUT.label],
+  [ATTENDANCE_MARKER.PROXY_CARD.label, ATTENDANCE_MARKER.PROXY_CARD.label],
   [WORK_RISK.HOLIDAY_WORK, WORK_RISK.HOLIDAY_WORK],
   [WORK_RISK.OVER_12_HOURS, WORK_RISK.OVER_12_HOURS],
   [WORK_RISK.REST_LESS_11, WORK_RISK.REST_LESS_11],
@@ -593,6 +606,7 @@ function createDaily(row) {
     attendanceEvents: [],
     attendanceStatuses: [],
     attendanceDetails: [],
+    attendanceMarkers: [],
     attendanceCalendarLines: [],
     workRisks: [],
     workRiskDetails: [],
@@ -627,6 +641,7 @@ function createDailyFromRecord(record) {
     attendanceEvents: [],
     attendanceStatuses: [],
     attendanceDetails: [],
+    attendanceMarkers: [],
     attendanceCalendarLines: [],
     workRisks: [],
     workRiskDetails: [],
@@ -650,7 +665,12 @@ function recordFromApplication(app, scheduleByKey, wageMap, attendanceIndex) {
   const type = normalizeOvertimeType(app.category || schedule?.type || classifyDay(schedule?.shift || app.shift || "", ""));
   const hourly = app.hourly || wageMap.get(`${app.person}|${app.month}`) || wageMap.get(`*|${app.month}`) || 0;
   const payResult = calculateOvertimePay(app.hours, hourly, type);
-  const attendance = evaluateAttendanceRecord(app, attendanceIndex.get(app.person) || []);
+  const personEvents = attendanceIndex.get(app.person) || [];
+  const attendance = evaluateAttendanceRecord(app, personEvents);
+  const attendanceMarkers = [
+    ...detectReturnAfterSignOut(app, schedule),
+    ...detectProxyCard(app, schedule, personEvents),
+  ];
   const audit = auditTextToCategories(app.audit);
 
   const record = {
@@ -676,6 +696,7 @@ function recordFromApplication(app, scheduleByKey, wageMap, attendanceIndex) {
     normalAttendanceText: app.normalAttendanceText,
     attendanceStatuses: unique([...attendance.statuses, ...audit.attendanceStatuses]),
     attendanceDetails: unique([...attendance.details, ...audit.attendanceDetails]),
+    attendanceMarkers,
     attendanceSections: attendance.sections,
     workRisks: unique(audit.workRisks),
     workRiskDetails: unique(audit.workRiskDetails),
@@ -722,6 +743,7 @@ function recordFromSchedule(row, wageMap) {
     normalAttendanceText: "",
     attendanceStatuses: [],
     attendanceDetails: ["出勤狀況：待覆核。未讀到加班單申請，請再確認原始資料。"],
+    attendanceMarkers: [],
     workRisks: [WORK_RISK.PENDING_REVIEW],
     workRiskDetails: ["差勤待覆核：未讀到加班單申請，先以排班加班時數呈現。"],
     matchedEntry: null,
@@ -731,6 +753,73 @@ function recordFromSchedule(row, wageMap) {
   };
   refreshRecordDerived(record);
   return record;
+}
+
+function detectReturnAfterSignOut(app, schedule) {
+  if (!app?.start || !schedule?.signOut) return [];
+
+  const candidateEvents = [
+    ...((schedule.otherSignIns || []).map((time) => ({ time, sourceLabel: "排班其他簽到" }))),
+    ...((app.signIns || []).map((time) => ({ time, sourceLabel: "加班單簽到" }))),
+  ]
+    .filter((event) => event.time > schedule.signOut)
+    .sort((left, right) => left.time - right.time);
+
+  const threshold = new Date(Math.max(addMinutes(schedule.signOut, 30).getTime(), addMinutes(app.start, TOLERANCE_MINUTES).getTime()));
+  const returnSignIn = candidateEvents.find((event) => event.time <= threshold);
+  if (!returnSignIn) return [];
+
+  return [{
+    key: ATTENDANCE_MARKER.RETURN_AFTER_SIGNOUT.key,
+    label: ATTENDANCE_MARKER.RETURN_AFTER_SIGNOUT.label,
+    originalSignOut: schedule.signOut,
+    returnSignIn: returnSignIn.time,
+    sourceLabel: returnSignIn.sourceLabel,
+    countsAsRisk: false,
+    note: `簽退 ${formatTimeWithSeconds(schedule.signOut)}，返回 ${formatTimeWithSeconds(returnSignIn.time)}`,
+    detail: `${ATTENDANCE_MARKER.RETURN_AFTER_SIGNOUT.label}：原簽退 ${formatDateTime(schedule.signOut)}，新簽到 ${formatDateTime(returnSignIn.time)}${returnSignIn.sourceLabel ? `（${returnSignIn.sourceLabel}）` : ""}`,
+  }];
+}
+
+function detectProxyCard(app, schedule, personEvents) {
+  if (!app?.start || !app?.end) return [];
+
+  const windowStart = addHours(app.start, -ENTRY_LOOKBACK_HOURS);
+  const windowEnd = addMinutes(app.end, TOLERANCE_MINUTES);
+  const clockCandidates = [
+    ...(schedule?.signIn ? [{ time: schedule.signIn, sourceLabel: "排班簽到" }] : []),
+    ...((schedule?.otherSignIns || []).map((time) => ({ time, sourceLabel: "排班其他簽到" }))),
+    ...((app.signIns || []).map((time) => ({ time, sourceLabel: "加班單簽到" }))),
+  ]
+    .filter((event) => event.time >= windowStart && event.time <= addMinutes(app.start, TOLERANCE_MINUTES))
+    .sort((left, right) => right.time - left.time);
+  const clockEntry = clockCandidates[0];
+  if (!clockEntry) return [];
+
+  const carEntry = personEvents
+    .filter((event) => (
+      event.sourceGroup === "car"
+      && event.direction === "entry"
+      && event.time >= clockEntry.time
+      && event.time <= windowEnd
+    ))
+    .sort((left, right) => left.time - right.time)[0];
+
+  if (!carEntry) return [];
+
+  const gapMs = carEntry.time - clockEntry.time;
+  if (gapMs < 30 * 60 * 1000) return [];
+
+  return [{
+    key: ATTENDANCE_MARKER.PROXY_CARD.key,
+    label: ATTENDANCE_MARKER.PROXY_CARD.label,
+    countsAsRisk: true,
+    clockEntry: clockEntry.time,
+    carEntry: carEntry.time,
+    sourceLabel: clockEntry.sourceLabel,
+    note: `簽到 ${formatTimeWithSeconds(clockEntry.time)}，汽車進場 ${formatTimeWithSeconds(carEntry.time)}`,
+    detail: `${ATTENDANCE_MARKER.PROXY_CARD.label}：簽到時間 ${formatDateTime(clockEntry.time)}，汽車進場卻是 ${formatDateTime(carEntry.time)}`,
+  }];
 }
 
 function refreshRecordDerived(record) {
@@ -981,6 +1070,7 @@ function finalizeDailyRows(dailyMap) {
   dailyMap.forEach((daily) => {
     const attendanceStatuses = [];
     const attendanceDetails = [];
+    const attendanceMarkers = [];
     const attendanceCalendarLines = [];
     const workRisks = [];
     const workRiskDetails = [...daily.workRiskDetails];
@@ -988,6 +1078,7 @@ function finalizeDailyRows(dailyMap) {
     daily.overtimeRecords.forEach((record) => {
       attendanceStatuses.push(...record.attendanceStatuses);
       attendanceDetails.push(...record.attendanceDetails);
+      attendanceMarkers.push(...(record.attendanceMarkers || []));
       attendanceCalendarLines.push(...buildRecordAttendanceCalendarLines(record));
       workRisks.push(...record.workRisks);
       workRiskDetails.push(...record.workRiskDetails);
@@ -1001,6 +1092,7 @@ function finalizeDailyRows(dailyMap) {
 
     daily.attendanceStatuses = unique(attendanceStatuses);
     daily.attendanceDetails = unique(attendanceDetails);
+    daily.attendanceMarkers = uniqueBy(attendanceMarkers, (marker) => `${marker.key}|${marker.note || ""}|${marker.detail || ""}`);
     daily.attendanceCalendarLines = uniqueBy(attendanceCalendarLines, (line) => `${line.text}|${line.tone}`);
     daily.workRisks = unique([...daily.workRisks, ...workRisks]);
     daily.workRiskDetails = unique([...daily.workRiskDetails, ...workRiskDetails]);
@@ -1014,8 +1106,8 @@ function finalizeDailyRows(dailyMap) {
 function buildCalendarNotes(daily) {
   const notes = [];
   if (daily.workRisks.includes(WORK_RISK.REST_LESS_11) && daily.overtimeRecords.length === 0) {
-    const signIn = daily.signIn ? `簽到 ${formatCalendarTime(daily.signIn, daily.date)}` : "";
-    const signOut = daily.signOut ? `簽退 ${formatCalendarTime(daily.signOut, daily.date)}` : "";
+    const signIn = daily.signIn ? `簽到 ${formatCalendarTime(daily.signIn, daily.date, true)}` : "";
+    const signOut = daily.signOut ? `簽退 ${formatCalendarTime(daily.signOut, daily.date, true)}` : "";
     if (signIn || signOut) notes.push([signIn, signOut].filter(Boolean).join(" / "));
   }
   return notes;
@@ -1078,8 +1170,11 @@ function getFilteredDailyRows() {
   return state.dailyRows.filter((daily) => {
     if (state.selectedMonth && daily.month !== state.selectedMonth) return false;
     if (state.selectedPerson !== "all" && daily.person !== state.selectedPerson) return false;
-    if (state.selectedRisk === "hasRisk" && daily.risks.length === 0) return false;
-    if (!["all", "hasRisk"].includes(state.selectedRisk) && !daily.risks.includes(state.selectedRisk)) return false;
+    if (state.selectedRisk === "hasRisk" && !dailyHasAnyRisk(daily)) return false;
+    if (!["all", "hasRisk"].includes(state.selectedRisk)) {
+      const hasMarker = (daily.attendanceMarkers || []).some((marker) => marker.label === state.selectedRisk);
+      if (!daily.risks.includes(state.selectedRisk) && !hasMarker) return false;
+    }
     return true;
   });
 }
@@ -1088,8 +1183,11 @@ function getFilteredRecords() {
   return state.overtimeRecords.filter((record) => {
     if (state.selectedMonth && record.month !== state.selectedMonth) return false;
     if (state.selectedPerson !== "all" && record.person !== state.selectedPerson) return false;
-    if (state.selectedRisk === "hasRisk" && record.risks.length === 0) return false;
-    if (!["all", "hasRisk"].includes(state.selectedRisk) && !record.risks.includes(state.selectedRisk)) return false;
+    if (state.selectedRisk === "hasRisk" && !recordHasAnyRisk(record)) return false;
+    if (!["all", "hasRisk"].includes(state.selectedRisk)) {
+      const hasMarker = (record.attendanceMarkers || []).some((marker) => marker.label === state.selectedRisk);
+      if (!record.risks.includes(state.selectedRisk) && !hasMarker) return false;
+    }
     return true;
   });
 }
@@ -1099,7 +1197,7 @@ function renderMetrics(dailyRows, records) {
   const totalPay = sum(records.map((record) => record.estimatedPay));
   const attendanceRiskDays = unique(
     dailyRows
-      .filter((daily) => daily.attendanceStatuses.length > 0)
+      .filter((daily) => dailyHasAttendanceRisk(daily))
       .map((daily) => daily.dateKey),
   ).length;
   const workRiskDays = unique(
@@ -1112,6 +1210,24 @@ function renderMetrics(dailyRows, records) {
   dom.metricPay.textContent = currency(totalPay);
   dom.metricAttendanceRiskDays.textContent = `${attendanceRiskDays}`;
   dom.metricWorkRiskDays.textContent = `${workRiskDays}`;
+}
+
+function recordHasAttendanceRisk(record) {
+  return Boolean((record.attendanceStatuses || []).length)
+    || (record.attendanceMarkers || []).some((marker) => marker.countsAsRisk);
+}
+
+function recordHasAnyRisk(record) {
+  return Boolean((record.risks || []).length) || recordHasAttendanceRisk(record);
+}
+
+function dailyHasAttendanceRisk(daily) {
+  return Boolean((daily.attendanceStatuses || []).length)
+    || (daily.overtimeRecords || []).some((record) => recordHasAttendanceRisk(record));
+}
+
+function dailyHasAnyRisk(daily) {
+  return Boolean((daily.risks || []).length) || dailyHasAttendanceRisk(daily);
 }
 
 function renderCalendar(dailyRows) {
@@ -1194,7 +1310,13 @@ function dayLineHtml(text, kind = "") {
 function dayIssueHtml(line) {
   const range = line.range ? `<span class="day-issue-range">${escapeHtml(line.range)}</span>` : "";
   const pills = (line.items || []).map((item) => dayPillHtml(item.label, attendancePillClass(item.status))).join("");
-  return `<div class="day-issue-line">${range}<span class="day-pill-row">${pills}</span></div>`;
+  const notes = (line.notes || []).map((note) => `<div class="day-issue-note">${escapeHtml(note)}</div>`).join("");
+  return `
+    <div class="day-issue-block">
+      <div class="day-issue-line">${range}<span class="day-pill-row">${pills}</span></div>
+      ${notes ? `<div class="day-issue-notes">${notes}</div>` : ""}
+    </div>
+  `;
 }
 
 function dayPillHtml(text, kind = "") {
@@ -1206,6 +1328,8 @@ function riskPillClass(risk) {
 }
 
 function attendanceStatusClass(status) {
+  if (status === ATTENDANCE_MARKER.RETURN_AFTER_SIGNOUT.key) return "return";
+  if (status === ATTENDANCE_MARKER.PROXY_CARD.key) return "proxy";
   if ([ATTENDANCE_STATUS.MISSING_SIGN_IN.short, ATTENDANCE_STATUS.MISSING_SIGN_OUT.short].includes(status)) return "missing";
   if (status === ATTENDANCE_STATUS.EARLY_LEAVE.short) return "early";
   if (status === ATTENDANCE_STATUS.LATE_OVERTIME.short) return "late";
@@ -1240,7 +1364,7 @@ function renderDetail(dailyRows) {
     (event) => `${event.person}|${event.direction}|${event.sourceLabel}|${event.time.getTime()}`,
   ).sort((a, b) => a.time - b.time);
   const attendanceSummaryItems = records.flatMap((record) => buildAttendanceSummaryItems(record));
-  const attendanceBadges = attendanceStatuses.length
+  const attendanceBadges = attendanceSummaryItems.length
     ? uniqueBy(attendanceSummaryItems, (item) => item.label).map((item) => statusBadgeHtml(item.label, attendancePillClass(item.status))).join("")
     : records.length
       ? statusBadgeHtml(ATTENDANCE_STATUS.NORMAL.long, "attendance ok")
@@ -1352,7 +1476,7 @@ function formatDisplayMultiplier(multiplier) {
 }
 
 function renderRiskTable(dailyRows) {
-  const riskRows = dailyRows.filter((daily) => daily.risks.length > 0);
+  const riskRows = dailyRows.filter((daily) => dailyHasAnyRisk(daily));
   dom.riskSubtitle.textContent = `${riskRows.length} 筆日期需覆核`;
   if (!riskRows.length) {
     dom.riskTableBody.innerHTML = '<tr><td colspan="6" class="table-empty">目前篩選無異常資料</td></tr>';
@@ -1646,22 +1770,29 @@ function buildDayRecordIssueLines(records) {
 }
 
 function buildDayRecordIssueGroups(records) {
-  return records
+  return dedupeDuplicateProxyMarkers(
+    records
     .slice()
     .sort((left, right) => (left.start?.getTime() || 0) - (right.start?.getTime() || 0))
     .map((record) => {
-      const items = buildAttendanceDisplayItems(record.attendanceStatuses || []);
+      const items = [
+        ...buildAttendanceMarkerItems(record),
+        ...buildAttendanceDisplayItems(record.attendanceStatuses || []),
+      ];
       if (!items.length) return null;
       return {
         range: shortRangeLabel(record.start, record.end, record.startRaw, record.endRaw),
         items,
+        notes: unique(items.map((item) => item.note).filter(Boolean)),
       };
     })
-    .filter(Boolean);
+    .filter(Boolean),
+  );
 }
 
 function buildRiskSummaryAttendanceBlocks(records) {
-  return records
+  return dedupeDuplicateProxyMarkers(
+    records
     .slice()
     .sort((left, right) => (left.start?.getTime() || 0) - (right.start?.getTime() || 0))
     .map((record) => {
@@ -1670,6 +1801,28 @@ function buildRiskSummaryAttendanceBlocks(records) {
       return {
         range: shortRangeLabel(record.start, record.end, record.startRaw, record.endRaw),
         items,
+      };
+    })
+    .filter(Boolean),
+  );
+}
+
+function dedupeDuplicateProxyMarkers(groups) {
+  const seenProxyMarkers = new Set();
+  return groups
+    .map((group) => {
+      const items = (group.items || []).filter((item) => {
+        if (item.status !== ATTENDANCE_MARKER.PROXY_CARD.key) return true;
+        const dedupeKey = `${item.status}|${item.note || ""}|${item.text || ""}`;
+        if (seenProxyMarkers.has(dedupeKey)) return false;
+        seenProxyMarkers.add(dedupeKey);
+        return true;
+      });
+      if (!items.length) return null;
+      return {
+        ...group,
+        items,
+        notes: unique(items.map((item) => item.note).filter(Boolean)),
       };
     })
     .filter(Boolean);
@@ -1729,15 +1882,38 @@ function buildAttendanceDisplayItems(statuses) {
   return items;
 }
 
+function buildAttendanceMarkerItems(record) {
+  return (record.attendanceMarkers || []).map((marker) => {
+    const tone = marker.key === ATTENDANCE_MARKER.PROXY_CARD.key ? "proxy" : "return";
+    return {
+      key: marker.key,
+      label: marker.label,
+      status: marker.key,
+      tone,
+      marker: true,
+      note: marker.note || "",
+      detail: marker.detail,
+    };
+  });
+}
+
 function buildAttendanceSummaryItems(record) {
   const section = record.attendanceSections?.[0];
-  return buildAttendanceDisplayItems(record.attendanceStatuses || []).map((item) => ({
-    ...item,
-    text: buildAttendanceSummaryText(record, section, item),
-  }));
+  return [
+    ...buildAttendanceMarkerItems(record).map((item) => ({
+      ...item,
+      text: buildAttendanceSummaryText(record, section, item),
+    })),
+    ...buildAttendanceDisplayItems(record.attendanceStatuses || []).map((item) => ({
+      ...item,
+      text: buildAttendanceSummaryText(record, section, item),
+    })),
+  ];
 }
 
 function buildAttendanceSummaryText(record, section, item) {
+  if (item.marker) return item.detail || item.label;
+
   if (item.merged) {
     return `簽到、簽退無紀錄：${formatDateTime(record.start)} 起至 ${formatDateTime(record.end)} 前後未找到可佐證開始或結束加班的紀錄`;
   }
@@ -1777,6 +1953,15 @@ function buildRiskSummaryWorkBlocks(daily) {
 
 function buildRecordEvidenceItems(record) {
   const items = [];
+  (record.attendanceMarkers || []).forEach((marker) => {
+    if (marker.key === ATTENDANCE_MARKER.RETURN_AFTER_SIGNOUT.key) {
+      items.push(`${marker.label}：原簽退 ${formatDateTime(marker.originalSignOut)}，新簽到 ${formatDateTime(marker.returnSignIn)}`);
+      return;
+    }
+    if (marker.key === ATTENDANCE_MARKER.PROXY_CARD.key) {
+      items.push(`${marker.label}：簽到時間 ${formatDateTime(marker.clockEntry)}，汽車進場卻是 ${formatDateTime(marker.carEntry)}`);
+    }
+  });
   (record.attendanceSections || []).forEach((section) => {
     if (section.entry) items.push(`${section.title}起始 ${formatDateTime(section.entry.time)}（${section.entry.sourceLabel}）`);
     if (section.exit) items.push(`${section.title}結束 ${formatDateTime(section.exit.time)}（${section.exit.sourceLabel}）`);
@@ -1795,7 +1980,7 @@ function buildRecordIssueItems(record) {
 }
 
 function shortRangeLabel(start, end, startRaw = "", endRaw = "") {
-  if (start && end) return `${formatCalendarTime(start, start)}-${formatCalendarTime(end, start)}`;
+  if (start && end) return `${formatCalendarTime(start, start, false)}-${formatCalendarTime(end, start, false)}`;
   if (startRaw || endRaw) return `${cleanText(startRaw)}-${cleanText(endRaw)}`.replace(/^-|-$/g, "");
   return "本筆";
 }
@@ -1968,14 +2153,26 @@ function formatDisplayDate(date) {
 
 function formatDateTime(date) {
   if (!date) return "";
-  return `${formatDateKey(date)} ${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+  return `${formatDateKey(date)} ${formatTimeWithSeconds(date)}`;
 }
 
-function formatCalendarTime(date, baseDate) {
+function formatTimeWithSeconds(date) {
   if (!date) return "";
+  return [
+    String(date.getHours()).padStart(2, "0"),
+    String(date.getMinutes()).padStart(2, "0"),
+    String(date.getSeconds()).padStart(2, "0"),
+  ].join(":");
+}
+
+function formatCalendarTime(date, baseDate, includeSeconds = true) {
+  if (!date) return "";
+  const timeText = includeSeconds
+    ? formatTimeWithSeconds(date)
+    : `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
   const sameDay = baseDate && formatDateKey(date) === formatDateKey(baseDate);
-  if (sameDay) return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
-  return `${String(date.getMonth() + 1).padStart(2, "0")}/${String(date.getDate()).padStart(2, "0")} ${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+  if (sameDay) return timeText;
+  return `${String(date.getMonth() + 1).padStart(2, "0")}/${String(date.getDate()).padStart(2, "0")} ${timeText}`;
 }
 
 function formatRange(start, end, startRaw, endRaw) {

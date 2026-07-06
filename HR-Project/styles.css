@@ -410,6 +410,16 @@ select:disabled {
   color: #9a6a00;
 }
 
+.badge.attendance.return {
+  background: #ffe3d6;
+  color: #c96f42;
+}
+
+.badge.attendance.proxy {
+  background: #fde6e6;
+  color: #b63a3a;
+}
+
 .badge.work {
   background: #efe7ff;
   color: #61369c;
@@ -480,10 +490,27 @@ select:disabled {
   flex-wrap: wrap;
 }
 
+.day-issue-block {
+  display: grid;
+  gap: 4px;
+}
+
 .day-issue-range {
   font-size: 11px;
   color: #1f2937;
   font-weight: 600;
+}
+
+.day-issue-notes {
+  display: grid;
+  gap: 2px;
+  margin-left: 2px;
+}
+
+.day-issue-note {
+  font-size: 11px;
+  line-height: 1.35;
+  color: #475569;
 }
 
 .day-pill-row {
@@ -522,6 +549,16 @@ select:disabled {
   color: #9a6a00;
 }
 
+.day-pill.attendance.return {
+  background: #ffe3d6;
+  color: #c96f42;
+}
+
+.day-pill.attendance.proxy {
+  background: #fde6e6;
+  color: #b63a3a;
+}
+
 .day-line.attendance.ok {
   color: var(--ok);
 }
@@ -536,6 +573,14 @@ select:disabled {
 
 .day-line.attendance.missing {
   color: #9a6a00;
+}
+
+.day-line.attendance.return {
+  color: #c96f42;
+}
+
+.day-line.attendance.proxy {
+  color: #b63a3a;
 }
 
 .day-line.work-risk {
