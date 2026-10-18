@@ -95,6 +95,176 @@ h2 {
   white-space: nowrap;
 }
 
+.version-links {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-shrink: 0;
+}
+
+.version-links a {
+  color: var(--accent);
+  font-size: 14px;
+}
+
+body[data-mode="approval"] h1 {
+  font-size: 28px;
+  overflow-wrap: anywhere;
+}
+
+body[data-mode="approval"] .app-shell {
+  width: min(1440px, 100%);
+  padding: 16px;
+}
+
+body[data-mode="approval"] .toolbar {
+  grid-template-columns: auto repeat(3, minmax(150px, 1fr)) auto auto;
+}
+
+body[data-mode="approval"] .summary-grid {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+
+body[data-mode="approval"] .metric strong {
+  font-size: 26px;
+  overflow-wrap: anywhere;
+}
+
+.metric.approval-over-limit strong {
+  color: #8b1e2d;
+}
+
+.day-pill.approval-denied {
+  background: #8b1e2d;
+  color: #ffffff;
+  white-space: nowrap;
+  border-radius: 999px;
+}
+
+body[data-mode="approval"] .day-pill,
+body[data-mode="approval"] .badge {
+  white-space: normal;
+  max-inline-size: 100%;
+  overflow-wrap: anywhere;
+  flex-shrink: 1;
+  line-height: 1.4;
+  padding-block: 4px;
+  text-wrap: balance;
+}
+
+.day-line.metric-approved {
+  color: #366c57;
+}
+
+.source-note {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.approval-summary {
+  display: grid;
+  justify-items: start;
+  gap: 6px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+body[data-mode="approval"] .weekday-row,
+body[data-mode="approval"] .calendar-grid {
+  min-width: 0;
+}
+
+body[data-mode="approval"] .calendar-panel {
+  overflow: clip;
+  min-width: 0;
+}
+
+body[data-mode="approval"] .content-layout {
+  grid-template-columns: minmax(0, 1fr) 340px;
+  align-items: start;
+}
+
+body[data-mode="approval"] .detail-panel {
+  position: sticky;
+  top: 112px;
+  max-height: calc(100dvh - 128px);
+  overflow-y: auto;
+}
+
+body[data-mode="approval"] .day-cell {
+  min-width: 0;
+  padding: 6px;
+}
+
+body[data-mode="approval"] .day-top {
+  margin: -6px -6px 10px;
+}
+
+body[data-mode="approval"] .day-line,
+body[data-mode="approval"] .day-issue-note,
+body[data-mode="approval"] .day-shift-inline {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+body[data-mode="approval"] .day-pill {
+  padding-inline: 4px;
+}
+
+body[data-mode="approval"] .day-issue-block .day-pill-row {
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+  max-width: 100%;
+}
+
+body[data-mode="approval"] .record-list {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+body[data-mode="approval"] #calendarPanel,
+body[data-mode="approval"] #dateDetail {
+  scroll-margin-top: 112px;
+}
+
+.calendar-return {
+  display: none;
+  color: var(--accent);
+  font-size: 14px;
+  white-space: nowrap;
+}
+
+.day-weekday {
+  display: none;
+}
+
+@media (max-width: 760px) {
+  body[data-mode="approval"] .weekday-row,
+  body[data-mode="approval"] .day-cell.outside {
+    display: none;
+  }
+
+  body[data-mode="approval"] .calendar-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  body[data-mode="approval"] .day-weekday {
+    display: inline;
+  }
+}
+
+@media (max-width: 420px) {
+  body[data-mode="approval"] .calendar-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .toolbar,
 .summary-grid,
 .calendar-panel,
@@ -817,7 +987,8 @@ td:last-child {
 }
 
 @media (max-width: 1100px) {
-  .toolbar {
+  .toolbar,
+  body[data-mode="approval"] .toolbar {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -826,8 +997,19 @@ td:last-child {
     width: 100%;
   }
 
-  .content-layout {
+  .content-layout,
+  body[data-mode="approval"] .content-layout {
     grid-template-columns: 1fr;
+  }
+
+  body[data-mode="approval"] .detail-panel {
+    position: static;
+    max-height: none;
+    overflow-y: visible;
+  }
+
+  body[data-mode="approval"] .calendar-return {
+    display: inline;
   }
 }
 
@@ -842,8 +1024,26 @@ td:last-child {
   }
 
   .toolbar,
+  body[data-mode="approval"] .toolbar,
   .summary-grid {
     grid-template-columns: 1fr;
+  }
+
+  body[data-mode="approval"] .summary-grid {
+    grid-template-columns: repeat(5, minmax(136px, 1fr));
+    overflow-x: auto;
+  }
+
+  body[data-mode="approval"] .metric {
+    padding: 12px;
+  }
+
+  body[data-mode="approval"] .metric strong {
+    font-size: 22px;
+  }
+
+  body[data-mode="approval"] .metric span {
+    min-height: 36px;
   }
 
   .calendar-grid {

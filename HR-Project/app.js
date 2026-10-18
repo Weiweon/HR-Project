@@ -1,6 +1,7 @@
 "use strict";
 
 const dom = {};
+const APPROVAL_MODE = document.body?.dataset.mode === "approval";
 
 const TOLERANCE_MINUTES = 10;
 const ENTRY_LOOKBACK_HOURS = 18;
@@ -93,6 +94,7 @@ function cacheDom() {
     "exportDetailBtn",
     "fileStatus",
     "metricHours",
+    "metricApprovedHours",
     "metricPay",
     "metricAttendanceRiskDays",
     "metricWorkRiskDays",
@@ -146,6 +148,7 @@ async function handleFile(event) {
 }
 
 function loadWorkbook(workbook, fileName) {
+  if (APPROVAL_MODE) return approvalView.loadWorkbook(workbook, fileName);
   const scheduleSheetName = findSheetByHeaders(workbook, ["日期", "班別"], ["排班"]);
   const wageSheetName = findSheetByHeaders(workbook, ["姓名", "年月", "時薪"], ["時薪"]);
   const carSheetName = findSheetByHeaders(workbook, ["狀態", "日期", "紀錄"], ["汽車進出紀錄"]);
@@ -225,7 +228,7 @@ function parseScheduleSheet(sheet) {
         type: classifyDay(shift, nationalHoliday),
         scheduledHours: parseNumber(getField(row, ["班別時數", "班工時"])),
         dailyWorkHours: parseNumber(getField(row, ["當日工時"])),
-        overtimeHours: parseNumber(getField(row, ["加班時數", "延展工時"])),
+        overtimeHours: APPROVAL_MODE ? 0 : parseNumber(getField(row, ["加班時數", "延展工時"])),
         signInRaw: cleanText(signInRaw),
         signOutRaw: cleanText(signOutRaw),
         expectedInRaw: cleanText(expectedInRaw),
@@ -489,7 +492,7 @@ function buildAnalysis() {
 
   state.attendanceIndex = buildAttendanceIndex(state.scheduleRows, state.applicationRows, state.carRows);
 
-  const useApplications = state.applicationRows.length > 0;
+  const useApplications = APPROVAL_MODE || state.applicationRows.length > 0;
   state.dataSourceMode = useApplications ? "application" : "schedule";
   const records = useApplications
     ? state.applicationRows.map((app) => recordFromApplication(app, scheduleByKey, wageMap, state.attendanceIndex))
@@ -502,7 +505,7 @@ function buildAnalysis() {
     const daily = dailyMap.get(key);
     daily.overtimeRecords.push(record);
     daily.overtimeHours += record.hours;
-    daily.estimatedPay += record.estimatedPay;
+    daily.estimatedPay += record.estimatedPay || 0;
     daily.type = record.type || daily.type;
     daily.shift = daily.shift || record.shift;
   });
@@ -663,7 +666,7 @@ function attachDailyAttendance(dailyMap, attendanceIndex) {
 function recordFromApplication(app, scheduleByKey, wageMap, attendanceIndex) {
   const schedule = scheduleByKey.get(dailyKey(app.person, app.dateKey));
   const type = normalizeOvertimeType(app.category || schedule?.type || classifyDay(schedule?.shift || app.shift || "", ""));
-  const hourly = app.hourly || wageMap.get(`${app.person}|${app.month}`) || wageMap.get(`*|${app.month}`) || 0;
+  const hourly = app.hourly || wageMap.get(`${app.person}|${app.month}`) || (!APPROVAL_MODE && wageMap.get(`*|${app.month}`)) || 0;
   const payResult = calculateOvertimePay(app.hours, hourly, type);
   const personEvents = attendanceIndex.get(app.person) || [];
   const attendance = evaluateAttendanceRecord(app, personEvents);
@@ -713,6 +716,7 @@ function recordFromApplication(app, scheduleByKey, wageMap, attendanceIndex) {
     ]);
   }
 
+  if (APPROVAL_MODE) approvalView.enrichRecord(record, app, wageMap);
   refreshRecordDerived(record);
   return record;
 }
@@ -1056,11 +1060,12 @@ function applyMonthlyOvertimeRisk(records, dailyMap) {
       cumulative += record.hours;
       record.monthlyCumulative = cumulative;
       if (cumulative > 46) {
+        const cumulativeLabel = APPROVAL_MODE ? "申請累計" : "當月累計延展工時";
         record.workRisks.push(WORK_RISK.OVER_46_HOURS);
-        record.workRiskDetails.push(`${WORK_RISK.OVER_46_HOURS}：當月累計延展工時 ${formatNumber(cumulative, 1)} 小時。`);
+        record.workRiskDetails.push(`${WORK_RISK.OVER_46_HOURS}：${cumulativeLabel} ${formatNumber(cumulative, 1)} 小時。`);
         refreshRecordDerived(record);
         const daily = dailyMap.get(dailyKey(record.person, record.dateKey));
-        addWorkRisk(daily, WORK_RISK.OVER_46_HOURS, `當月累計延展工時 ${formatNumber(cumulative, 1)} 小時。`);
+        addWorkRisk(daily, WORK_RISK.OVER_46_HOURS, `${cumulativeLabel} ${formatNumber(cumulative, 1)} 小時。`);
       }
     });
   });
@@ -1068,6 +1073,7 @@ function applyMonthlyOvertimeRisk(records, dailyMap) {
 
 function finalizeDailyRows(dailyMap) {
   dailyMap.forEach((daily) => {
+    if (APPROVAL_MODE) approvalView.finalizeDaily(daily);
     const attendanceStatuses = [];
     const attendanceDetails = [];
     const attendanceMarkers = [];
@@ -1108,7 +1114,10 @@ function buildCalendarNotes(daily) {
   if (daily.workRisks.includes(WORK_RISK.REST_LESS_11) && daily.overtimeRecords.length === 0) {
     const signIn = daily.signIn ? `簽到 ${formatCalendarTime(daily.signIn, daily.date, true)}` : "";
     const signOut = daily.signOut ? `簽退 ${formatCalendarTime(daily.signOut, daily.date, true)}` : "";
-    if (signIn || signOut) notes.push([signIn, signOut].filter(Boolean).join(" / "));
+    if (signIn || signOut) {
+      if (APPROVAL_MODE) notes.push(...[signIn, signOut].filter(Boolean));
+      else notes.push([signIn, signOut].filter(Boolean).join(" / "));
+    }
   }
   return notes;
 }
@@ -1140,7 +1149,8 @@ function addWorkRisk(target, risk, detail = "") {
 function setupControls() {
   setSelectOptions(dom.monthSelect, state.months.map((month) => [month, month]), state.selectedMonth);
   setSelectOptions(dom.personSelect, [["all", "全部"], ...state.people.map((person) => [person, person])], "all");
-  setSelectOptions(dom.riskSelect, riskOptions, "all");
+  const displayRiskOptions = APPROVAL_MODE ? riskOptions.map(([value, label]) => [value, value === ATTENDANCE_STATUS.LATE_OVERTIME.short ? approvalView.lateSignInLabel : label]) : riskOptions;
+  setSelectOptions(dom.riskSelect, APPROVAL_MODE ? [...displayRiskOptions, [approvalView.limitLabel, approvalView.limitLabel], ["unapproved", "有未核給時數"]] : riskOptions, "all");
   [dom.monthSelect, dom.personSelect, dom.riskSelect, dom.exportSummaryBtn, dom.exportDetailBtn].forEach((control) => {
     control.disabled = false;
   });
@@ -1170,6 +1180,8 @@ function getFilteredDailyRows() {
   return state.dailyRows.filter((daily) => {
     if (state.selectedMonth && daily.month !== state.selectedMonth) return false;
     if (state.selectedPerson !== "all" && daily.person !== state.selectedPerson) return false;
+    if (APPROVAL_MODE && state.selectedRisk === "unapproved") return daily.unapprovedHours > 0;
+    if (APPROVAL_MODE && state.selectedRisk === approvalView.limitLabel) return daily.overtimeRecords.some((record) => record.approvalAlerts.includes(approvalView.limitLabel));
     if (state.selectedRisk === "hasRisk" && !dailyHasAnyRisk(daily)) return false;
     if (!["all", "hasRisk"].includes(state.selectedRisk)) {
       const hasMarker = (daily.attendanceMarkers || []).some((marker) => marker.label === state.selectedRisk);
@@ -1183,6 +1195,8 @@ function getFilteredRecords() {
   return state.overtimeRecords.filter((record) => {
     if (state.selectedMonth && record.month !== state.selectedMonth) return false;
     if (state.selectedPerson !== "all" && record.person !== state.selectedPerson) return false;
+    if (APPROVAL_MODE && state.selectedRisk === "unapproved") return record.unapprovedHours > 0;
+    if (APPROVAL_MODE && state.selectedRisk === approvalView.limitLabel) return record.approvalAlerts.includes(approvalView.limitLabel);
     if (state.selectedRisk === "hasRisk" && !recordHasAnyRisk(record)) return false;
     if (!["all", "hasRisk"].includes(state.selectedRisk)) {
       const hasMarker = (record.attendanceMarkers || []).some((marker) => marker.label === state.selectedRisk);
@@ -1193,6 +1207,7 @@ function getFilteredRecords() {
 }
 
 function renderMetrics(dailyRows, records) {
+  if (APPROVAL_MODE) return approvalView.renderMetrics();
   const totalHours = sum(records.map((record) => record.hours));
   const totalPay = sum(records.map((record) => record.estimatedPay));
   const attendanceRiskDays = unique(
@@ -1218,7 +1233,8 @@ function recordHasAttendanceRisk(record) {
 }
 
 function recordHasAnyRisk(record) {
-  return Boolean((record.risks || []).length) || recordHasAttendanceRisk(record);
+  return Boolean((record.risks || []).length) || recordHasAttendanceRisk(record)
+    || (APPROVAL_MODE && (record.unapprovedHours > 0 || record.approvalNotes.length > 0));
 }
 
 function dailyHasAttendanceRisk(daily) {
@@ -1227,7 +1243,8 @@ function dailyHasAttendanceRisk(daily) {
 }
 
 function dailyHasAnyRisk(daily) {
-  return Boolean((daily.risks || []).length) || dailyHasAttendanceRisk(daily);
+  return Boolean((daily.risks || []).length) || dailyHasAttendanceRisk(daily)
+    || (APPROVAL_MODE && daily.overtimeRecords.some(recordHasAnyRisk));
 }
 
 function renderCalendar(dailyRows) {
@@ -1261,6 +1278,12 @@ function renderCalendar(dailyRows) {
       state.selectedDateKey = dateKey;
       renderDetail(dailyRows);
       renderCalendar(dailyRows);
+      if (APPROVAL_MODE && window.matchMedia("(max-width: 1100px)").matches) {
+        document.getElementById("dateDetail")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      } else if (APPROVAL_MODE) {
+        const panel = document.getElementById("dateDetail");
+        if (panel) panel.scrollTop = 0;
+      }
     });
     cell.innerHTML = dayCellHtml(current, items, current.getMonth() !== monthDate.getMonth());
     dom.calendarGrid.appendChild(cell);
@@ -1274,12 +1297,17 @@ function dayCellHtml(date, items, isOutside = false) {
   const totalPay = sum(items.map((item) => item.estimatedPay));
   const attendanceLines = uniqueBy(items.flatMap((item) => item.attendanceCalendarLines || []), (line) => `${line.text}|${line.tone}`);
   const anomalyGroups = buildDayRecordIssueGroups(items.flatMap((item) => item.overtimeRecords || []));
-  const workRisks = unique(items.flatMap((item) => item.workRisks.filter((risk) => risk !== WORK_RISK.PENDING_REVIEW)));
+  const workRisks = unique(items.flatMap((item) => APPROVAL_MODE
+    ? approvalView.calendarWorkRisks(item)
+    : item.workRisks.filter((risk) => risk !== WORK_RISK.PENDING_REVIEW)));
   const notes = unique(items.flatMap((item) => item.calendarNotes));
   const rows = [];
 
-  if (overtimeHours > 0) rows.push(dayLineHtml(`⏱️延展工時 ${formatNumber(overtimeHours, 1)} h`, "metric metric-hours"));
-  if (totalPay > 0) rows.push(dayLineHtml(`💰加班費${currency(totalPay)}`, "metric metric-pay"));
+  if (APPROVAL_MODE) rows.push(...approvalView.dayMetricRows(items));
+  else {
+    if (overtimeHours > 0) rows.push(dayLineHtml(`⏱️延展工時 ${formatNumber(overtimeHours, 1)} h`, "metric metric-hours"));
+    if (totalPay > 0) rows.push(dayLineHtml(`💰加班費${currency(totalPay)}`, "metric metric-pay"));
+  }
   if (anomalyGroups.length) {
     anomalyGroups.forEach((group) => rows.push(dayIssueHtml(group)));
   } else {
@@ -1294,6 +1322,7 @@ function dayCellHtml(date, items, isOutside = false) {
     <div class="day-top">
       <div class="day-meta">
         <span class="day-number">${isOutside ? "&nbsp;" : `${date.getDate()}日`}</span>
+        ${APPROVAL_MODE && !isOutside ? `<span class="day-weekday">（${["日", "一", "二", "三", "四", "五", "六"][date.getDay()]}）</span>` : ""}
         ${shift ? `<span class="day-shift-inline">${escapeHtml(shift)}</span>` : ""}
       </div>
     </div>
@@ -1358,7 +1387,9 @@ function renderDetail(dailyRows) {
   const totalPay = sum(items.map((item) => item.estimatedPay));
   const records = items.flatMap((item) => item.overtimeRecords);
   const attendanceStatuses = unique(items.flatMap((item) => item.attendanceStatuses));
-  const workRisks = unique(items.flatMap((item) => item.workRisks.filter((risk) => risk !== WORK_RISK.PENDING_REVIEW)));
+  const workRisks = unique(items.flatMap((item) => APPROVAL_MODE
+    ? approvalView.calendarWorkRisks(item)
+    : item.workRisks.filter((risk) => risk !== WORK_RISK.PENDING_REVIEW)));
   const attendanceEvents = uniqueBy(
     items.flatMap((item) => item.attendanceEvents),
     (event) => `${event.person}|${event.direction}|${event.sourceLabel}|${event.time.getTime()}`,
@@ -1378,8 +1409,7 @@ function renderDetail(dailyRows) {
   dom.detailBody.className = "detail-body";
   dom.detailBody.innerHTML = `
     <div class="detail-stack">
-      <div class="detail-row"><span>加班時數</span><strong>${formatNumber(totalHours, 1)} 小時</strong></div>
-      <div class="detail-row"><span>加班費</span><strong>${currency(totalPay)}</strong></div>
+      ${APPROVAL_MODE ? approvalView.detailTotals(items) : `<div class="detail-row"><span>加班時數</span><strong>${formatNumber(totalHours, 1)} 小時</strong></div><div class="detail-row"><span>加班費</span><strong>${currency(totalPay)}</strong></div>`}
       <div class="detail-row"><span>當日紀錄</span><div class="timeline-text">${attendanceEvents.length ? attendanceEvents.map(formatAttendanceEvent).join("、") : "無"}</div></div>
       <section class="detail-section">
         <h3>出勤狀況</h3>
@@ -1389,7 +1419,7 @@ function renderDetail(dailyRows) {
       <section class="detail-section">
         <h3>延展工時異常</h3>
         <div class="risk-list">${workBadges}</div>
-        <div class="detail-notes">${renderNoteList(unique(items.flatMap((item) => item.workRiskDetails)))}</div>
+        <div class="detail-notes">${renderNoteList(unique(items.flatMap((item) => APPROVAL_MODE ? approvalView.visibleWorkRiskDetails(item) : item.workRiskDetails)))}</div>
       </section>
       <div class="record-list">${records.length ? records.map(recordHtml).join("") : '<div class="empty-state">目前沒有加班單明細。</div>'}</div>
     </div>
@@ -1397,6 +1427,7 @@ function renderDetail(dailyRows) {
 }
 
 function recordHtml(record) {
+  if (APPROVAL_MODE) return approvalView.recordHtml(record);
   const segments = formatRecordSegmentSummary(record);
   const attendanceSummaryItems = buildAttendanceSummaryItems(record);
 
@@ -1476,6 +1507,7 @@ function formatDisplayMultiplier(multiplier) {
 }
 
 function renderRiskTable(dailyRows) {
+  if (APPROVAL_MODE) return approvalView.renderRiskTable(dailyRows);
   const riskRows = dailyRows.filter((daily) => dailyHasAnyRisk(daily));
   dom.riskSubtitle.textContent = `${riskRows.length} 筆日期需覆核`;
   if (!riskRows.length) {
@@ -1535,6 +1567,7 @@ function renderEmptyCalendar() {
 }
 
 function exportSummaryCsv() {
+  if (APPROVAL_MODE) return approvalView.exportSummaryCsv();
   const rows = getFilteredDailyRows();
   const grouped = groupBy(rows, (row) => `${row.month}|${row.person}`);
   const data = [["月份", "人員", "延展工時", "額外加班費", "異常天數", "異常類型"]];
@@ -1555,6 +1588,7 @@ function exportSummaryCsv() {
 }
 
 function exportDetailCsv() {
+  if (APPROVAL_MODE) return approvalView.exportDetailCsv();
   const data = [[
     "日期",
     "月份",
@@ -1614,6 +1648,7 @@ function csvCell(value) {
 
 function setStatus(message, warning) {
   dom.fileStatus.textContent = message;
+  if (APPROVAL_MODE) dom.fileStatus.hidden = !message;
   dom.fileStatus.classList.toggle("warning", Boolean(warning));
 }
 
@@ -1741,6 +1776,7 @@ function statusLongLabel(shortLabel) {
 }
 
 function statusDisplayLabel(value) {
+  if (APPROVAL_MODE && value === ATTENDANCE_STATUS.LATE_OVERTIME.short) return approvalView.lateSignInLabel;
   return statusLongLabel(value);
 }
 
@@ -1783,7 +1819,7 @@ function buildDayRecordIssueGroups(records) {
       return {
         range: shortRangeLabel(record.start, record.end, record.startRaw, record.endRaw),
         items,
-        notes: unique(items.map((item) => item.note).filter(Boolean)),
+        notes: unique(items.flatMap((item) => item.calendarNotes || [item.note]).filter(Boolean)),
       };
     })
     .filter(Boolean),
@@ -1822,7 +1858,7 @@ function dedupeDuplicateProxyMarkers(groups) {
       return {
         ...group,
         items,
-        notes: unique(items.map((item) => item.note).filter(Boolean)),
+        notes: unique(items.flatMap((item) => item.calendarNotes || [item.note]).filter(Boolean)),
       };
     })
     .filter(Boolean);
@@ -1892,6 +1928,11 @@ function buildAttendanceMarkerItems(record) {
       tone,
       marker: true,
       note: marker.note || "",
+      calendarNotes: APPROVAL_MODE && marker.key === ATTENDANCE_MARKER.PROXY_CARD.key
+        ? [`簽到 ${formatCalendarTime(marker.clockEntry, record.date)}`, `汽車進場 ${formatCalendarTime(marker.carEntry, record.date)}`]
+        : APPROVAL_MODE && marker.key === ATTENDANCE_MARKER.RETURN_AFTER_SIGNOUT.key
+          ? [`原簽退 ${formatCalendarTime(marker.originalSignOut, record.date)}`, `返回簽到 ${formatCalendarTime(marker.returnSignIn, record.date)}`]
+          : undefined,
       detail: marker.detail,
     };
   });
@@ -1919,7 +1960,7 @@ function buildAttendanceSummaryText(record, section, item) {
   }
 
   if (item.status === ATTENDANCE_STATUS.LATE_OVERTIME.short) {
-    return `${ATTENDANCE_STATUS.LATE_OVERTIME.long}：實際簽到採認紀錄為 ${formatDateTime(section?.entry?.time)}${section?.entry?.sourceLabel ? `（${section.entry.sourceLabel}）` : ""}`;
+    return `${APPROVAL_MODE ? "簽到晚" : ATTENDANCE_STATUS.LATE_OVERTIME.long}：實際簽到採認紀錄為 ${formatDateTime(section?.entry?.time)}${section?.entry?.sourceLabel ? `（${section.entry.sourceLabel}）` : ""}`;
   }
 
   if (item.status === ATTENDANCE_STATUS.EARLY_LEAVE.short) {
@@ -2265,6 +2306,9 @@ function currency(value) {
 }
 
 function riskLabel(value) {
+  if (APPROVAL_MODE && value === ATTENDANCE_STATUS.LATE_OVERTIME.short) return approvalView.lateSignInLabel;
+  if (APPROVAL_MODE && value === "unapproved") return "有未核給時數";
+  if (APPROVAL_MODE && value === approvalView.limitLabel) return approvalView.limitLabel;
   return riskOptions.find((item) => item[0] === value)?.[1] || "全部";
 }
 
