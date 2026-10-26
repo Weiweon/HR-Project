@@ -1350,7 +1350,7 @@ function dayIssueHtml(line) {
   const notes = (line.notes || []).map((note) => `<div class="day-issue-note">${escapeHtml(note)}</div>`).join("");
   return `
     <div class="day-issue-block">
-      <div class="day-issue-line">${range}<span class="day-pill-row">${pills}</span></div>
+      <div class="day-issue-line">${range}${pills ? `<span class="day-pill-row">${pills}</span>` : ""}</div>
       ${notes ? `<div class="day-issue-notes">${notes}</div>` : ""}
     </div>
   `;
@@ -1829,11 +1829,12 @@ function buildDayRecordIssueGroups(records) {
         ...buildAttendanceDisplayItems(record.attendanceStatuses || []),
         ...surgeryAudit.items(record),
       ];
-      if (!items.length) return null;
+      const evidenceNotes = surgeryAudit.acceptedCalendarNotes(record);
+      if (!items.length && !evidenceNotes.length) return null;
       return {
         range: shortRangeLabel(record.start, record.end, record.startRaw, record.endRaw),
         items,
-        notes: unique(items.flatMap((item) => item.calendarNotes || [item.note]).filter(Boolean)),
+        evidenceNotes,
       };
     })
     .filter(Boolean),
@@ -1872,11 +1873,12 @@ function dedupeDuplicateProxyMarkers(groups) {
         seenProxyMarkers.add(dedupeKey);
         return true;
       });
-      if (!items.length) return null;
+      const evidenceNotes = group.evidenceNotes || [];
+      if (!items.length && !evidenceNotes.length) return null;
       return {
         ...group,
         items,
-        notes: unique(items.flatMap((item) => item.calendarNotes || [item.note]).filter(Boolean)),
+        notes: unique([...items.flatMap((item) => item.calendarNotes || [item.note]), ...evidenceNotes].filter(Boolean)),
       };
     })
     .filter(Boolean);

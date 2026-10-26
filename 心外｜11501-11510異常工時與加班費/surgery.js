@@ -5,6 +5,7 @@ const surgeryAudit = {
   loaded: false,
   fileName: "",
   issueFilter: "procedure-review",
+  postoperativeMinutes: 30,
 
   parseDate(value) {
     if (value instanceof Date) return Number.isNaN(+value) ? null : new Date(+value);
@@ -122,7 +123,7 @@ const surgeryAudit = {
       if (record.end < first || record.start > last) return { ...base, nearbyEvidence, label: "超出手術資料期間", detail: "申請區間不在本次手術資料期間內，尚無法覆核。" };
       return { ...base, nearbyEvidence, risk: true, label: "無對應手術時段", detail: "未找到與加班起訖相符之執行時段，須補其他佐證。" };
     }
-    const intervals = evidence.filter((row) => row.end > row.start);
+    const intervals = evidence.filter((row) => row.end > row.start).sort((a, b) => a.start - b.start);
     if (!intervals.length) return { ...base, evidence, label: "手術僅時間點", detail: "T／U 時間相同，僅能佐證執行時間點，無法證明整段加班。" };
     const tolerance = TOLERANCE_MINUTES * 60000;
     const merged = [];
@@ -132,18 +133,31 @@ const surgeryAudit = {
       else merged.push({ start: +row.start, end: +row.end });
     });
     let coveredUntil = +record.start;
+    let hasCoverage = false;
+    let interrupted = false;
     for (const row of merged) {
-      if (row.start > coveredUntil + tolerance) break;
+      if (row.end <= +record.start) continue;
+      if (row.start >= +record.end) break;
+      if (row.start > coveredUntil + tolerance) { interrupted = true; break; }
+      hasCoverage = true;
       coveredUntil = Math.max(coveredUntil, row.end);
     }
-    const covered = coveredUntil >= +record.end - tolerance;
+    const covered = hasCoverage && !interrupted && coveredUntil >= +record.end - tolerance;
+    const endGapMinutes = Math.max(0, (+record.end - coveredUntil) / 60000);
+    // Allow only a terminal cleanup gap, never a late start, internal gap or isolated time point.
+    const postoperativeAssumed = !covered && hasCoverage && !interrupted
+      && endGapMinutes <= this.postoperativeMinutes;
+    const supported = covered || postoperativeAssumed;
     const exact = covered && merged.some((row) => Math.abs(row.start - record.start) <= tolerance && Math.abs(row.end - record.end) <= tolerance);
     const spans = merged.map((row) => shortRangeLabel(new Date(row.start), new Date(row.end))).join("、");
     const overlapHours = sum(merged.map((row) => Math.max(0, Math.min(row.end, +record.end) - Math.max(row.start, +record.start)))) / 36e5;
     return {
-      ...base, evidence, pending: !covered, risk: !covered, overlapHours,
-      label: covered ? exact ? "手術起訖相符" : "手術時段涵蓋" : overlapHours > 0 ? "手術部分重疊" : "無對應手術時段",
-      detail: covered ? `T／U 時段 ${spans}${exact ? "，起訖差異在 10 分鐘內。" : "，涵蓋申請；非起訖完全相同。"}執行人員仍需依其他佐證確認。` : `T／U 時段 ${spans}，重疊 ${formatNumber(overlapHours, 2)} h；其餘申請區間需補其他工作或術前術後作業佐證。`,
+      ...base, evidence, pending: !supported, risk: !supported, overlapHours,
+      postoperativeAssumed, postoperativeMinutes: postoperativeAssumed ? endGapMinutes : 0,
+      label: postoperativeAssumed ? "術後整理推定" : covered ? exact ? "手術起訖相符" : "手術時段涵蓋" : overlapHours > 0 ? "手術部分重疊" : "無對應手術時段",
+      detail: postoperativeAssumed
+        ? `手術連續佐證至 ${formatDateTime(new Date(coveredUntil))}；加班申請至 ${formatDateTime(record.end)}，相差 ${formatNumber(endGapMinutes, 2)} 分鐘，依 ${this.postoperativeMinutes} 分鐘內術後整理原則推定可接受，非實際整理紀錄；執行人員仍需依其他佐證確認。`
+        : covered ? `T／U 時段 ${spans}${exact ? "，起訖差異在 10 分鐘內。" : "，涵蓋申請；非起訖完全相同。"}執行人員仍需依其他佐證確認。` : `T／U 時段 ${spans}，重疊 ${formatNumber(overlapHours, 2)} h；其餘申請區間需補其他工作或術前術後作業佐證。`,
     };
   },
 
@@ -161,6 +175,15 @@ const surgeryAudit = {
   displayLabel(result) {
     if (!result) return "未匯入手術明細";
     return result.evidence.length && (result.risk || result.pending) ? "與加班起訖時間不符" : result.label;
+  },
+
+  acceptedCalendarNotes(record) {
+    const result = record.procedureAudit;
+    if (!result || result.risk || result.pending) return [];
+    const times = this.timeLabels(record, true);
+    const notes = times.slice(0, 2);
+    if (times.length > 2) notes.push(`另 ${times.length - 2} 組執行時段`);
+    return notes;
   },
 
   timeLabels(record, fullDate = false) {
@@ -190,7 +213,7 @@ const surgeryAudit = {
     if (!result) return "";
     const times = this.timeLabels(record, true);
     return `<section class="record-mini-section procedure-detail"><h4>手術／ECMO 佐證</h4>${this.items(record).map((item) => statusBadgeHtml(item.label, `attendance ${item.tone}`)).join("")}
-      ${!result.evidence.length ? `<p>${escapeHtml(result.detail)}</p>` : ""}
+      ${!result.evidence.length || result.postoperativeAssumed ? `<p>${escapeHtml(result.detail)}</p>` : ""}
       ${times.length ? renderCompactList(times) : ""}</section>`;
   },
 
