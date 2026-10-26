@@ -772,6 +772,16 @@ select:disabled {
   color: var(--muted);
 }
 
+.procedure-nearest-text {
+  color: inherit;
+  font-weight: 400;
+}
+
+.procedure-nearest-label {
+  color: #b63a3a;
+  font-weight: 600;
+}
+
 .detail-body {
   padding: 16px;
 }

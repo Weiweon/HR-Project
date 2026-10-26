@@ -778,12 +778,21 @@ function detectReturnAfterSignOut(app, schedule) {
   const threshold = new Date(Math.max(addMinutes(schedule.signOut, 30).getTime(), addMinutes(app.start, TOLERANCE_MINUTES).getTime()));
   const returnSignIn = candidateEvents.find((event) => event.time <= threshold);
   if (!returnSignIn) return [];
+  const scheduledEnd = schedule.expectedOut;
+  const overtimeStartsNearScheduledEnd = Boolean(
+    app.end
+    && scheduledEnd
+    && Math.abs(app.start.getTime() - scheduledEnd.getTime()) <= 30 * 60000
+    && returnSignIn.time >= addMinutes(app.start, -TOLERANCE_MINUTES)
+    && returnSignIn.time <= addMinutes(app.end, TOLERANCE_MINUTES),
+  );
 
   return [{
     key: ATTENDANCE_MARKER.RETURN_AFTER_SIGNOUT.key,
     label: ATTENDANCE_MARKER.RETURN_AFTER_SIGNOUT.label,
     originalSignOut: schedule.signOut,
     returnSignIn: returnSignIn.time,
+    overtimeStartsNearScheduledEnd,
     sourceLabel: returnSignIn.sourceLabel,
     countsAsRisk: false,
     note: `簽退 ${formatTimeWithSeconds(schedule.signOut)}，返回 ${formatTimeWithSeconds(returnSignIn.time)}`,
@@ -1324,7 +1333,7 @@ function dayCellHtml(date, items, isOutside = false) {
   if (workRisks.length) {
     rows.push(`<div class="day-pill-row">${workRisks.map((risk) => dayPillHtml(risk, riskPillClass(risk))).join("")}</div>`);
   }
-  notes.forEach((note) => rows.push(dayLineHtml(note, "note")));
+  notes.forEach((note) => rows.push(dayLineHtml(note, note.startsWith("當日最接近手術") ? "note procedure-nearest-text" : "note")));
 
   return `
     <div class="day-top">
@@ -1341,13 +1350,14 @@ function dayCellHtml(date, items, isOutside = false) {
 }
 
 function dayLineHtml(text, kind = "") {
-  return `<div class="day-line ${kind}">${escapeHtml(text)}</div>`;
+  const content = text.startsWith("當日最接近手術") ? renderNearestSurgeryReference(text) : escapeHtml(text);
+  return `<div class="day-line ${kind}">${content}</div>`;
 }
 
 function dayIssueHtml(line) {
   const range = line.range ? `<span class="day-issue-range">${escapeHtml(line.range)}</span>` : "";
   const pills = (line.items || []).map((item) => dayPillHtml(item.label, attendancePillClass(item.status))).join("");
-  const notes = (line.notes || []).map((note) => `<div class="day-issue-note">${escapeHtml(note)}</div>`).join("");
+  const notes = (line.notes || []).map((note) => `<div class="day-issue-note${note.startsWith("當日最接近手術") ? " procedure-nearest-text" : ""}">${note.startsWith("當日最接近手術") ? renderNearestSurgeryReference(note) : escapeHtml(note)}</div>`).join("");
   return `
     <div class="day-issue-block">
       <div class="day-issue-line">${range}${pills ? `<span class="day-pill-row">${pills}</span>` : ""}</div>
@@ -1551,7 +1561,7 @@ function renderRiskSummaryCell(daily) {
           <div class="risk-block-title">●加班起訖 ${escapeHtml(block.range)}</div>
           ${block.items.map((item) => `
             <div class="risk-summary-line">
-              ${item.lines?.length ? `<div class="risk-note">${item.lines.map((line) => `<div>${escapeHtml(line)}</div>`).join("")}</div>` : item.text ? `<span class="risk-note">${escapeHtml(item.text)}</span>` : ""}
+              ${item.lines?.length ? `<div class="risk-note">${item.lines.map((line) => `<div class="${line.startsWith("當日最接近手術") ? "procedure-nearest-text" : ""}">${line.startsWith("當日最接近手術") ? renderNearestSurgeryReference(line) : escapeHtml(line)}</div>`).join("")}</div>` : item.text ? `<span class="risk-note">${escapeHtml(item.text)}</span>` : ""}
               ${dayPillHtml(item.label, attendancePillClass(item.status))}
             </div>
           `).join("")}

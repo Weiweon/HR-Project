@@ -17,12 +17,12 @@ function context() {
 const run = (ctx, code) => vm.runInContext(code, ctx);
 const json = (ctx, code) => JSON.parse(run(ctx, `JSON.stringify(${code})`));
 
-function fixture(ctx, { requests = [], grants = [], wage = 100 } = {}) {
-  ctx.input = { requests, grants, wage };
+function fixture(ctx, { requests = [], grants = [], wage = 100, scheduleDate = '2026/09/15', scheduleSignIn = '06:00:03', scheduleSignOut = '23:59:50', scheduleOtherSignIns = '' } = {}) {
+  ctx.input = { requests, grants, wage, scheduleDate, scheduleSignIn, scheduleSignOut, scheduleOtherSignIns };
   run(ctx, `var book=XLSX.utils.book_new();
     var add=(name,rows)=>XLSX.utils.book_append_sheet(book,XLSX.utils.aoa_to_sheet(rows),name);
     add('排班',[['電子簽章','日期','班別','班別時數','簽到','簽退','應簽到','應簽退','其他簽到','其他簽退','加班時數'],
-      ['Test A','2026/09/15','D8',8,'06:00:03','23:59:50','08:00','16:30','','',999]]);
+      ['Test A',input.scheduleDate,'D8',8,input.scheduleSignIn,input.scheduleSignOut,'08:00','16:30',input.scheduleOtherSignIns,'',999]]);
     add('未核可｜加班單申請',[['日期','部門','出勤者','班別','申請時數','事由','起始時間','終止時間','正常簽到退','簽到','簽退'],
       ...input.requests.map(r=>[r.date||'2026/09/15','','Test A','D8',r.hours,r.reason||'Test',r.start||'16:30',r.end||'20:30','','',''])]);
     add('核可｜加班單申請',[['日期','出勤者','部門','計薪年月','班別','加班總時數','加班起始時間','加班終止時間','簽到','簽退','加班費倍率','','','',''],
@@ -140,13 +140,77 @@ check("T/U time comparison does not require a staff or patient match", () => {
 });
 
 check("partial overlap, no overlap, and point-only evidence are distinct", () => {
-  const ctx = context(); fixture(ctx, { grants: [{ hours: 4 }] });
+  const ctx = context(); fixture(ctx, { grants: [{ hours: 4 }], scheduleSignIn:'', scheduleSignOut:'' });
   surgeryFixture(ctx, [["11509151700", "11509151900"]]);
   assert.equal(run(ctx, 'state.overtimeRecords[0].procedureAudit.label'), "手術部分重疊");
   surgeryFixture(ctx, [["11509150800", "11509151000"], ["11509160800", "11509161000"]]);
   assert.equal(run(ctx, 'state.overtimeRecords[0].procedureAudit.label'), "無對應手術時段");
   surgeryFixture(ctx, [["11509151800", "11509151800"]]);
   assert.equal(run(ctx, 'state.overtimeRecords[0].procedureAudit.label'), "手術僅時間點");
+});
+
+check("sign-out return partial surgery is reference-only and only its label is red", () => {
+  const ctx = context();
+  fixture(ctx, { scheduleDate:'2026/08/06', scheduleSignOut:'16:33:33', grants:[{
+    date:'2026/08/06', hours:13, start:'16:30', end:'2026/08/07 05:30', signIn:'2026/08/06 16:42:10',
+  }] });
+  surgeryFixture(ctx, [["1150806182500", "1150807044500"]]);
+  run(ctx, 'var record=state.overtimeRecords[0];var daily=state.dailyRows.find(d=>d.dateKey==="2026-08-06")');
+  assert.equal(run(ctx, 'record.attendanceMarkers.some(m=>m.key===ATTENDANCE_MARKER.RETURN_AFTER_SIGNOUT.key)'), true);
+  assert.equal(run(ctx, 'formatDateTime(record.start)'), '2026-08-06 16:30:00');
+  assert.equal(run(ctx, 'record.procedureAudit.label'), '無對應手術時段');
+  assert.equal(run(ctx, 'record.procedureAudit.returnAfterSignOutReference'), true);
+  assert.equal(run(ctx, 'record.procedureAudit.evidence.length'), 0);
+  assert.equal(run(ctx, 'record.procedureAudit.nearbyEvidence.length'), 1);
+  assert.equal(run(ctx, 'surgeryAudit.timeLabels(record,true)[0]'), '當日最接近手術時間 2026-08-06 18:25:00-2026-08-07 04:45:00');
+  const calendar=run(ctx, 'dayCellHtml(daily.date,[daily])');
+  const table=run(ctx, 'renderRiskSummaryCell(daily)');
+  const detail=run(ctx, 'surgeryAudit.detailHtml(record)');
+  for(const html of [calendar,table,detail]) {
+    assert.ok(html.includes('無對應手術時段'));
+    assert.ok(html.includes('<span class="procedure-nearest-label">當日最接近手術時間</span> 2026-08-06 18:25:00-2026-08-07 04:45:00'));
+    assert.ok(!html.includes('與加班起訖時間不符'));
+    assert.ok(html.includes('procedure-nearest-text'));
+  }
+  assert.equal(run(ctx, 'renderNearestSurgeryReference("當日最接近手術時間點 2026-10-06 09:12:00")'),
+    '<span class="procedure-nearest-label">當日最接近手術時間點</span> 2026-10-06 09:12:00');
+  assert.ok(run(ctx, 'surgeryAudit.exportEvidence(record)').includes('當日最接近（非本筆對應佐證）'));
+  assert.match(fs.readFileSync(path.join(root,'styles.css'),'utf8'), /\.procedure-nearest-label\s*\{[^}]*color:\s*#b63a3a/s);
+});
+
+check("fragmented surgery with clock records is reference-only across all views", () => {
+  const ctx = context();
+  fixture(ctx, { scheduleDate:'2026/08/30', scheduleSignIn:'14:10:50', scheduleSignOut:'21:54:19', grants:[{
+    date:'2026/08/30', hours:8.23, shift:'OFF(休息日)_C', start:'13:40', end:'21:54',
+  }] });
+  surgeryFixture(ctx, [["1150830134900", "1150830141000"], ["1150830192600", "1150830204500"]]);
+  run(ctx, 'var record=state.overtimeRecords[0];var daily=state.dailyRows.find(d=>d.dateKey==="2026-08-30")');
+  assert.equal(run(ctx, 'record.procedureAudit.label'), '無對應手術時段');
+  assert.equal(run(ctx, 'record.procedureAudit.disconnectedAttendanceReference'), true);
+  assert.equal(run(ctx, 'record.procedureAudit.evidence.length'), 0);
+  assert.equal(run(ctx, 'record.procedureAudit.nearbyEvidence.length'), 2);
+  assert.ok(run(ctx, 'record.attendanceStatuses.includes(ATTENDANCE_STATUS.LATE_OVERTIME.short)'));
+  const expected = [
+    '<span class="procedure-nearest-label">當日最接近手術時間</span> 2026-08-30 13:49:00-2026-08-30 14:10:00',
+    '<span class="procedure-nearest-label">當日最接近手術時間</span> 2026-08-30 19:26:00-2026-08-30 20:45:00',
+  ];
+  for (const html of [run(ctx,'dayCellHtml(daily.date,[daily])'), run(ctx,'renderRiskSummaryCell(daily)'), run(ctx,'surgeryAudit.detailHtml(record)')]) {
+    assert.ok(html.includes('無對應手術時段'));
+    assert.ok(expected.every(text=>html.includes(text)));
+    assert.ok(!html.includes('與加班起訖時間不符'));
+  }
+});
+
+check("unrelated same-day sign-out return does not change surgery classification", () => {
+  const ctx = context();
+  fixture(ctx, { scheduleDate:'2026/08/06', scheduleSignOut:'17:25:00', scheduleOtherSignIns:'17:25:05', grants:[{
+    date:'2026/08/06', hours:4, start:'20:00', end:'2026/08/07 00:00',
+  }] });
+  surgeryFixture(ctx, [["1150806222600", "1150807035000"]]);
+  assert.equal(run(ctx, 'state.overtimeRecords[0].attendanceMarkers.some(m=>m.key===ATTENDANCE_MARKER.RETURN_AFTER_SIGNOUT.key)'), true);
+  assert.equal(run(ctx, 'state.overtimeRecords[0].attendanceMarkers[0].overtimeStartsNearScheduledEnd'), false);
+  assert.equal(run(ctx, 'state.overtimeRecords[0].procedureAudit.returnAfterSignOutReference'), undefined);
+  assert.equal(run(ctx, 'state.overtimeRecords[0].procedureAudit.label'), '手術部分重疊');
 });
 
 check("cross-midnight procedures and gaps between cases are respected", () => {
@@ -167,14 +231,14 @@ check("duplicates do not inflate surgery duration, invalid data is counted", () 
 
 check("either import order works and replacing data recomputes results", () => {
   const ctx = context(); surgeryFixture(ctx, [["11509151630", "11509152030"]]);
-  fixture(ctx, { grants: [{ hours: 4 }] });
+  fixture(ctx, { grants: [{ hours: 4 }], scheduleSignIn:'', scheduleSignOut:'' });
   assert.equal(run(ctx, 'state.overtimeRecords[0].procedureAudit.label'), "手術起訖相符");
   surgeryFixture(ctx, [["11509151800", "11509152000"]]);
   assert.equal(run(ctx, 'state.overtimeRecords[0].procedureAudit.label'), "手術部分重疊");
 });
 
 check("month/day summaries, filter and exports share the computed result", () => {
-  const ctx = context(); fixture(ctx, { grants: [{ hours: 9 }] });
+  const ctx = context(); fixture(ctx, { grants: [{ hours: 9 }], scheduleSignIn:'', scheduleSignOut:'' });
   surgeryFixture(ctx, [["11509151800", "11509152000"]]);
   run(ctx, 'state.selectedRisk=surgeryAudit.issueFilter');
   assert.equal(run(ctx, 'getFilteredRecords().length'), 1);
@@ -230,13 +294,14 @@ check("small gaps use tolerance without inflating actual overlap hours", () => {
   assert.ok(Math.abs(run(ctx, 'state.overtimeRecords[0].procedureAudit.overlapHours') - 235/60) < 0.0001);
 });
 
-check("July 21 surgery beginning during regular hours allows a 15-minute postoperative tail", () => {
-  const ctx = context(); fixture(ctx, { grants: [{ date:'2026/07/21', hours:9, start:'16:30', end:'2026/07/22 01:30' }] });
+check("July 21 postoperative inference requires matching attendance and keeps second-level evidence", () => {
+  const ctx = context(); fixture(ctx, { grants: [{ date:'2026/07/21', hours:9, start:'16:30', end:'2026/07/22 01:30', signIn:'2026/07/21 06:12:44', signOut:'2026/07/22 01:30:10' }] });
   const before = run(ctx, 'JSON.stringify(state.overtimeRecords.map(r=>[r.start,r.end,r.hours,r.approvedHours,r.estimatedPay,r.attendanceStatuses,r.workRisks]))');
   surgeryFixture(ctx, [["11507211417", "11507220115"]]);
   run(ctx, 'var record=state.overtimeRecords[0];var daily=state.dailyRows.find(d=>d.dateKey==="2026-07-21")');
   assert.deepEqual(json(ctx, '[record.procedureAudit.label,record.procedureAudit.risk,record.procedureAudit.pending,record.procedureAudit.postoperativeMinutes,record.procedureAudit.overlapHours]'),
     ['術後整理推定',false,false,15,8.75]);
+  assert.equal(run(ctx, 'record.procedureAudit.attendanceCorroborated'), true);
   assert.equal(run(ctx, 'JSON.stringify(state.overtimeRecords.map(r=>[r.start,r.end,r.hours,r.approvedHours,r.estimatedPay,r.attendanceStatuses,r.workRisks]))'), before);
   for (const code of ['dayCellHtml(daily.date,[daily])','renderRiskSummaryCell(daily)','surgeryAudit.detailHtml(record)']) {
     const html = run(ctx, code);
@@ -246,32 +311,66 @@ check("July 21 surgery beginning during regular hours allows a 15-minute postope
   assert.equal(calendar.split('手術執行 2026-07-21 14:17:00-2026-07-22 01:15:00').length - 1, 1);
   assert.equal(calendar.split('16:30-07/22 01:30').length - 1, 1);
   const detail = run(ctx, 'surgeryAudit.detailHtml(record)');
-  for (const text of ['2026-07-21 14:17:00','2026-07-22 01:15:00','2026-07-22 01:30:00','相差 15 分鐘','30 分鐘內術後整理','推定','非實際整理紀錄']) assert.ok(detail.includes(text));
+  for (const text of ['2026-07-21 14:17:00','2026-07-22 01:15:00','2026-07-22 01:30:00','相差 15 分鐘','簽到 2026-07-21 06:12:44','簽退 2026-07-22 01:30:10','術後整理推定','非實際整理紀錄']) assert.ok(detail.includes(text));
+  assert.ok(calendar.includes('出勤簽到退佐證 06:12:44-07/22 01:30:10'));
   assert.ok(run(ctx, 'surgeryAudit.exportEvidence(record)').includes('相差 15 分鐘'));
   run(ctx, 'state.selectedMonth="2026/07";state.selectedRisk=surgeryAudit.issueFilter');
   assert.equal(run(ctx, 'getFilteredRecords().length'), 0);
+
+  fixture(ctx, { grants: [{ date:'2026/07/21', hours:9, start:'16:30', end:'2026/07/22 01:30' }], scheduleSignIn:'', scheduleSignOut:'' });
+  surgeryFixture(ctx, [["11507211417", "11507220115"]]);
+  assert.equal(run(ctx, 'state.overtimeRecords[0].procedureAudit.risk'), true);
+  assert.equal(run(ctx, 'state.overtimeRecords[0].procedureAudit.postoperativeAssumed'), false);
+  assert.equal(run(ctx, 'state.overtimeRecords[0].procedureAudit.attendanceRequired'), true);
+  assert.equal(run(ctx, 'dayCellHtml(state.dailyRows[0].date,state.dailyRows).includes("簽到、簽退無紀錄")'), true);
 });
 
-check("postoperative allowance includes exactly 30 minutes but not 30 minutes and one second", () => {
+check("the 30-minute postoperative note requires clocks; wider tails need explicit attendance coverage", () => {
   const ctx = context(); fixture(ctx, { grants:[{hours:4}] });
   surgeryFixture(ctx, [["11509151400","11509152000"]]);
   assert.equal(run(ctx, 'state.overtimeRecords[0].procedureAudit.postoperativeMinutes'), 30);
   assert.equal(run(ctx, 'state.overtimeRecords[0].procedureAudit.risk'), false);
   assert.equal(run(ctx, 'state.overtimeRecords[0].procedureAudit.overlapHours'), 3.5);
   surgeryFixture(ctx, [["11509151400","1150915195959"]]);
-  assert.equal(run(ctx, 'state.overtimeRecords[0].procedureAudit.risk'), true);
+  assert.equal(run(ctx, 'state.overtimeRecords[0].procedureAudit.risk'), false);
   assert.equal(run(ctx, 'state.overtimeRecords[0].procedureAudit.postoperativeAssumed'), false);
+  assert.equal(run(ctx, 'state.overtimeRecords[0].procedureAudit.attendanceCorroborated'), true);
+  assert.equal(run(ctx, 'state.overtimeRecords[0].procedureAudit.label'), '出勤簽到退佐證');
   surgeryFixture(ctx, [["11509151400","11509152020"]]);
-  assert.equal(run(ctx, 'state.overtimeRecords[0].procedureAudit.postoperativeAssumed'), false);
-  assert.equal(run(ctx, 'state.overtimeRecords[0].procedureAudit.label'), '手術時段涵蓋');
+  assert.equal(run(ctx, 'state.overtimeRecords[0].procedureAudit.postoperativeAssumed'), true);
+  fixture(ctx, { grants:[{hours:4}], scheduleSignIn:'', scheduleSignOut:'' });
+  surgeryFixture(ctx, [["11509151400","11509152000"]]);
+  assert.equal(run(ctx, 'state.overtimeRecords[0].procedureAudit.risk'), true);
+  assert.equal(run(ctx, 'state.overtimeRecords[0].procedureAudit.attendanceRequired'), true);
 });
 
-check("September 3 afternoon still mismatches when surgery ends an hour before the request", () => {
+check("September 3 clock records corroborate overtime beyond the surgery end", () => {
+  const ctx = context(); fixture(ctx, { grants:[{date:'2026/09/03',hours:1.5,start:'16:30',end:'18:00',signIn:'2026/09/03 06:22:44',signOut:'2026/09/03 18:01:31'}] });
+  surgeryFixture(ctx, [["11509031456","11509031700"],["11509031624","11509031624"]]);
+  run(ctx, 'var record=state.overtimeRecords[0];var daily=state.dailyRows.find(d=>d.dateKey==="2026-09-03")');
+  assert.equal(run(ctx, 'record.procedureAudit.risk'), false);
+  assert.equal(run(ctx, 'record.procedureAudit.pending'), false);
+  assert.equal(run(ctx, 'record.procedureAudit.attendanceCorroborated'), true);
+  assert.equal(run(ctx, 'record.procedureAudit.label'), '出勤簽到退佐證');
+  assert.equal(run(ctx, 'formatDateTime(record.matchedExit.time)'), '2026-09-03 18:01:31');
+  assert.ok(run(ctx, 'record.procedureAudit.detail').includes('簽到 2026-09-03 06:22:44'));
+  assert.ok(run(ctx, 'record.procedureAudit.detail').includes('簽退 2026-09-03 18:01:31'));
+  const calendar = run(ctx, 'dayCellHtml(daily.date,[daily])');
+  const table = run(ctx, 'renderRiskSummaryCell(daily)');
+  const detail = run(ctx, 'surgeryAudit.detailHtml(record)');
+  for (const html of [calendar, table, detail]) assert.ok(!html.includes('與加班起訖時間不符'));
+  assert.ok(calendar.includes('手術執行 2026-09-03 14:56:00-2026-09-03 17:00:00'));
+  assert.ok(detail.includes('2026-09-03 14:56:00-2026-09-03 17:00:00'));
+  assert.ok(calendar.includes('出勤簽到退佐證 06:22:44-18:01:31'));
+});
+
+check("partial surgery without matching attendance remains for review", () => {
   const ctx = context(); fixture(ctx, { grants:[{date:'2026/09/03',hours:1.5,start:'16:30',end:'18:00'}] });
   surgeryFixture(ctx, [["11509031456","11509031700"],["11509031624","11509031624"]]);
   run(ctx, 'var record=state.overtimeRecords[0];var daily=state.dailyRows.find(d=>d.dateKey==="2026-09-03")');
   assert.equal(run(ctx, 'record.procedureAudit.risk'), true);
   assert.equal(run(ctx, 'record.procedureAudit.postoperativeAssumed'), false);
+  assert.equal(run(ctx, 'record.procedureAudit.attendanceRequired'), true);
   assert.equal(run(ctx, 'record.procedureAudit.overlapHours'), 0.5);
   for (const code of ['dayCellHtml(daily.date,[daily])','renderRiskSummaryCell(daily)','surgeryAudit.detailHtml(record)']) {
     assert.match(run(ctx, code), /procedure-risk[^>]*>與加班起訖時間不符/);
@@ -285,10 +384,12 @@ check("postoperative tolerance does not excuse a late start or a gap within surg
     [["11509151630","11509151730"],["11509151741","11509151750"]],
     [["11509151630","11509151650"],["11509151701","11509151800"]],
   ]) {
+    fixture(ctx, { grants:[{hours:1.5,start:'16:30',end:'18:00'}], scheduleSignIn:'', scheduleSignOut:'' });
     surgeryFixture(ctx, ranges);
     assert.equal(run(ctx, 'state.overtimeRecords[0].procedureAudit.risk'), true);
     assert.equal(run(ctx, 'state.overtimeRecords[0].procedureAudit.postoperativeAssumed'), false);
   }
+  fixture(ctx, { grants:[{hours:1.5,start:'16:30',end:'18:00'}] });
   surgeryFixture(ctx, [["11509151640","11509151745"]]);
   assert.equal(run(ctx, 'state.overtimeRecords[0].procedureAudit.postoperativeAssumed'), true);
 });
@@ -304,7 +405,7 @@ check("actual overlap is required and isolated time points never extend coverage
     assert.equal(run(ctx, 'Boolean(state.overtimeRecords[0].procedureAudit.postoperativeAssumed)'), false);
     assert.equal(run(ctx, 'state.overtimeRecords[0].procedureAudit.pending'), true);
   }
-  fixture(ctx, { grants:[{hours:1.5,start:'16:30',end:'18:00'}] });
+  fixture(ctx, { grants:[{hours:1.5,start:'16:30',end:'18:00'}], scheduleSignIn:'', scheduleSignOut:'' });
   surgeryFixture(ctx, [["11509151400","11509151700"],["11509151745","11509151745"]]);
   assert.equal(run(ctx, 'state.overtimeRecords[0].procedureAudit.risk'), true);
 });
@@ -319,14 +420,14 @@ check("continuous union allows cleanup without adding gaps or cleanup to real ov
 });
 
 check("reimporting surgery recomputes risk days, procedure filters and CSV classification", () => {
-  const ctx = context(); fixture(ctx, { grants:[{hours:4}] });
+  const ctx = context(); fixture(ctx, { grants:[{hours:4}], scheduleSignIn:'', scheduleSignOut:'' });
   surgeryFixture(ctx, [["11509151630","11509151930"]]);
-  assert.equal(run(ctx, 'recordHasAttendanceRisk(state.overtimeRecords[0])'), true);
-  surgeryFixture(ctx, [["11509151630","11509152000"]]);
-  assert.equal(run(ctx, 'recordHasAttendanceRisk(state.overtimeRecords[0])'), false);
+  assert.equal(run(ctx, 'state.overtimeRecords[0].procedureAudit.risk'), true);
+  surgeryFixture(ctx, [["11509151630","11509152030"]]);
+  assert.equal(run(ctx, 'state.overtimeRecords[0].procedureAudit.risk'), false);
   run(ctx, 'exportDetailCsv()');
-  assert.equal(run(ctx, 'csvResult[1][18]'), '術後整理推定');
-  assert.ok(run(ctx, 'csvResult[1][19]').includes('相差 30 分鐘'));
+  assert.equal(run(ctx, 'csvResult[1][18]'), '手術起訖相符');
+  assert.ok(run(ctx, 'csvResult[1][19]').includes('起訖差異在 10 分鐘內'));
   run(ctx, 'state.selectedRisk=surgeryAudit.issueFilter');
   assert.equal(run(ctx, 'getFilteredDailyRows().length'), 0);
   surgeryFixture(ctx, [["11509151630","11509151930"]]);
@@ -376,11 +477,11 @@ check("missing clocks show tags only and absent surgery does not add long list t
 });
 
 check("partial surgery shows exact execution times with mismatch tag in all views", () => {
-  const ctx = context();fixture(ctx,{grants:[{hours:7.5,start:'16:30',end:'23:59'}]});
+  const ctx = context();fixture(ctx,{grants:[{hours:7.5,start:'16:30',end:'23:59'}],scheduleSignIn:'',scheduleSignOut:''});
   surgeryFixture(ctx,[["11509152046","11509152145"]]);
   assert.equal(run(ctx,'surgeryAudit.items(state.overtimeRecords[0])[0].label'),'與加班起訖時間不符');
   const table=run(ctx,'renderRiskSummaryCell(state.dailyRows[0])');
-  for(const expected of ['20:46:00-21:45:00','與加班起訖時間不符'])assert.ok(table.includes(expected));
+  for(const expected of ['2026-09-15 20:46:00-2026-09-15 21:45:00','與加班起訖時間不符'])assert.ok(table.includes(expected));
   assert.ok(!table.includes('其餘申請區間需補'));
   const detail=run(ctx,'surgeryAudit.detailHtml(state.overtimeRecords[0])');
   assert.ok(detail.includes('2026-09-15 20:46:00-2026-09-15 21:45:00'));
@@ -388,7 +489,7 @@ check("partial surgery shows exact execution times with mismatch tag in all view
 });
 
 check("point-only and partial surgery use the same mismatch style without changing risk counts", () => {
-  const ctx = context(); fixture(ctx, { grants:[{hours:4}] });
+  const ctx = context(); fixture(ctx, { grants:[{hours:4}], scheduleSignIn:'', scheduleSignOut:'' });
   surgeryFixture(ctx, [["11509151800","11509151800"]]);
   assert.equal(run(ctx, 'state.overtimeRecords[0].procedureAudit.risk'), false);
   assert.equal(run(ctx, 'state.overtimeRecords[0].procedureAudit.pending'), true);
@@ -421,7 +522,7 @@ check("no overlap lists the nearest same-day point as reference, including when 
     assert.ok(html.includes('無對應手術時段'));
     assert.ok(!html.includes('13:50:00'));
   }
-  assert.ok(run(ctx,'surgeryAudit.exportEvidence(record)').includes('當日最接近（未重疊）：2026-09-15 08:36:00'));
+  assert.ok(run(ctx,'surgeryAudit.exportEvidence(record)').includes('當日最接近（非本筆對應佐證）：2026-09-15 08:36:00'));
 });
 
 check("nearest same-day ranges use interval distance, keep ties and do not borrow another date", () => {
@@ -429,16 +530,16 @@ check("nearest same-day ranges use interval distance, keep ties and do not borro
   surgeryFixture(ctx, [["11509140900","11509141000"], ["11509151400","11509151600"],
     ["11509152100","11509152300"], ["11509150800","11509151000"], ["11509160800","11509161000"]]);
   assert.deepEqual(json(ctx, 'surgeryAudit.timeLabels(state.overtimeRecords[0])'),
-    ['當日最接近手術 14:00:00-16:00:00','當日最接近手術 21:00:00-23:00:00']);
+    ['當日最接近手術時間 14:00:00-16:00:00','當日最接近手術時間 21:00:00-23:00:00']);
   surgeryFixture(ctx, [["11509140900","11509141000"], ["11509160800","11509161000"]]);
   assert.deepEqual(json(ctx, 'state.overtimeRecords[0].procedureAudit.nearbyEvidence'), []);
   assert.deepEqual(json(ctx, 'surgeryAudit.timeLabels(state.overtimeRecords[0])'), []);
 });
 
 check("same-day nearest references handle midnight and never replace overlapping evidence", () => {
-  const ctx = context(); fixture(ctx, { grants:[{hours:4,start:'16:30',end:'20:30'}] });
+  const ctx = context(); fixture(ctx, { grants:[{hours:4,start:'16:30',end:'20:30'}], scheduleSignIn:'', scheduleSignOut:'' });
   surgeryFixture(ctx, [["11509142300","11509150000"], ["11509152330","11509160030"]]);
-  assert.deepEqual(json(ctx, 'surgeryAudit.timeLabels(state.overtimeRecords[0])'), ['當日最接近手術 23:30:00-09/16 00:30:00']);
+  assert.deepEqual(json(ctx, 'surgeryAudit.timeLabels(state.overtimeRecords[0])'), ['當日最接近手術時間 23:30:00-09/16 00:30:00']);
   surgeryFixture(ctx, [["11509151400","11509151600"], ["11509151800","11509151900"]]);
   assert.deepEqual(json(ctx, 'state.overtimeRecords[0].procedureAudit.nearbyEvidence'), []);
   assert.deepEqual(json(ctx, 'surgeryAudit.timeLabels(state.overtimeRecords[0])'), ['手術執行 18:00:00-19:00:00']);
@@ -464,7 +565,7 @@ check("matching and covering procedures have no UI badge but retain detail times
   }
 });
 
-check("normal calendar evidence survives without attendance or procedure badges", () => {
+check("calendar preserves surgery and matching clock notes without status badges", () => {
   const ctx = context(); fixture(ctx, { grants:[{hours:4}] });
   surgeryFixture(ctx, [["11509151417","11509152015"]]);
   const before = run(ctx, 'JSON.stringify(state.overtimeRecords)');
@@ -487,13 +588,13 @@ check("calendar times stay under their chronological request without duplicating
   const groups = json(ctx, 'buildDayRecordIssueGroups(state.overtimeRecords)');
   assert.deepEqual(groups.map(g=>g.range), ['06:30-08:00','16:30-20:30']);
   assert.deepEqual(groups.map(g=>g.notes), [
-    ['手術執行 2026-09-15 06:20:00-2026-09-15 08:00:00'],
-    ['手術執行 2026-09-15 14:17:00-2026-09-15 20:15:00'],
+    ['手術執行 2026-09-15 06:20:00-2026-09-15 08:00:00','出勤簽到退佐證 06:00:03-23:59:50'],
+    ['手術執行 2026-09-15 14:17:00-2026-09-15 20:15:00','出勤簽到退佐證 06:00:03-23:59:50'],
   ]);
   surgeryFixture(ctx, [["11509150620","11509150800"],["11509151800","11509151900"]]);
   const html = run(ctx, 'dayCellHtml(state.dailyRows[0].date,state.dailyRows)');
-  assert.equal(html.split('手術執行 18:00:00-19:00:00').length - 1, 1);
-  assert.equal(html.split('與加班起訖時間不符').length - 1, 1);
+  assert.equal(html.split('<span class="procedure-nearest-label">當日最接近手術時間</span> 2026-09-15 18:00:00-2026-09-15 19:00:00').length - 1, 1);
+  assert.equal(html.split('無對應手術時段').length - 1, 1);
   assert.equal(run(ctx, 'surgeryAudit.acceptedCalendarNotes(state.overtimeRecords.find(r=>r.start.getHours()===16)).length'), 0);
 });
 
@@ -516,7 +617,8 @@ check("normal calendar shows two distinct time references and keeps the complete
   assert.deepEqual(json(ctx, 'surgeryAudit.acceptedCalendarNotes(state.overtimeRecords[0])'), []);
   surgeryFixture(ctx, [["11509151630","11509151800","Case A"],
     ["11509151800","11509151900","Case B"],["11509151900","11509152030","Case C"]]);
-  assert.equal(run(ctx, 'surgeryAudit.acceptedCalendarNotes(state.overtimeRecords[0]).at(-1)'), '另 1 組執行時段');
+  assert.ok(run(ctx, 'surgeryAudit.acceptedCalendarNotes(state.overtimeRecords[0]).includes("另 1 組執行時段")'));
+  assert.equal(run(ctx, 'surgeryAudit.acceptedCalendarNotes(state.overtimeRecords[0]).at(-1)'), '出勤簽到退佐證 06:00:03-23:59:50');
   assert.equal(run(ctx, 'surgeryAudit.timeLabels(state.overtimeRecords[0],true).length'), 3);
   assert.ok(run(ctx, 'surgeryAudit.detailHtml(state.overtimeRecords[0])').includes('2026-09-15 19:00:00-2026-09-15 20:30:00'));
 });
@@ -551,7 +653,7 @@ check("October 1 request keeps surgery and hours without generic unapproved tabl
   run(ctx, 'var daily=state.dailyRows.find(d=>d.dateKey==="2026-10-01");var record=daily.overtimeRecords[0]');
   const html = run(ctx, 'renderRiskSummaryCell(daily)');
   for (const text of ['有未核給時數','未核給原因待確認','請依退單及簽核紀錄確認','核給 0 h／未核給 4 h','手術時段涵蓋']) assert.ok(!html.includes(text));
-  for (const text of ['16:30-20:30','16:25:00-16:45:00','與加班起訖時間不符']) assert.ok(html.includes(text));
+  for (const text of ['16:30-20:30','2026-10-01 16:25:00-2026-10-01 16:45:00','與加班起訖時間不符']) assert.ok(html.includes(text));
   assert.deepEqual(json(ctx,'[record.hours,record.approvedHours,record.unapprovedHours]'),[4,0,4]);
 });
 
@@ -613,12 +715,101 @@ if (process.argv[2] && process.argv[3]) {
     const localSettings = path.join(root, 'private-settings.js');
     if (fs.existsSync(localSettings)) run(ctx, fs.readFileSync(localSettings, 'utf8'));
     run(ctx, 'var actualBook=XLSX.read(hrBytes,{type:"buffer",cellDates:true});loadWorkbook(actualBook,hrName);surgeryAudit.loadWorkbook(XLSX.read(surgeryBytes,{type:"buffer",cellDates:true}),"actual-surgery.xlsx")');
-    const result = json(ctx, `(()=>{const rows=payroll.parseApproved(actualBook,'核可｜加班單申請');const raw=XLSX.utils.sheet_to_json(actualBook.Sheets['核可｜加班單申請'],{header:1,raw:true,defval:''}).slice(2).filter(r=>r[1]&&Number(r[5])>0);const wages=buildWageMap(state.wageRows);return {sourceHours:raw.reduce((s,r)=>s+r.slice(10,15).reduce((a,v)=>a+(Number(v)||0),0),0),resultHours:sum(state.overtimeRecords.map(r=>r.approvedHours)),sourceCount:rows.length,resultCount:state.overtimeRecords.flatMap(r=>r.approvals).length,allAudited:state.overtimeRecords.every(r=>r.procedureAudit),sourcePay:sum(rows.map(g=>{const wage=approvalView.resolveHourly(g.person,g.month,wages);return g.bandHours.reduce((s,h,i)=>s+Math.ceil((h||0)*wage*[1,1.334,1.667,2.667,1.667][i]),0);})),resultPay:sum(state.overtimeRecords.map(r=>r.estimatedPay)),pending:state.overtimeRecords.filter(r=>r.payMissing).length};})()`);
+    const result = json(ctx, `(()=>{
+      const rows=payroll.parseApproved(actualBook,'核可｜加班單申請');
+      const raw=XLSX.utils.sheet_to_json(actualBook.Sheets['核可｜加班單申請'],{header:1,raw:true,defval:''}).slice(2).filter(r=>r[1]&&Number(r[5])>0);
+      const wages=buildWageMap(state.wageRows);
+      const records=state.overtimeRecords;
+      const disconnectedReferenceCases=records.filter(r=>r.procedureAudit.disconnectedAttendanceReference);
+      const jan3=records.find(r=>r.dateKey==='2026-01-03'&&r.start.getHours()===16&&r.start.getMinutes()===30);
+      const augustOctoberCases=records.filter(r=>['2026-08-30','2026-10-06'].includes(r.dateKey)).map(r=>({
+        date:r.dateKey,
+        start:formatDateTime(r.start),end:formatDateTime(r.end),
+        label:r.procedureAudit.label,risk:r.procedureAudit.risk,
+        evidenceCount:r.procedureAudit.evidence.length,
+        nearest:surgeryAudit.timeLabels({...r,procedureAudit:{...r.procedureAudit,evidence:[],nearbyEvidence:surgeryAudit.nearestSameDay(r)}},true),
+      }));
+      const target=records.filter(r=>r.dateKey==='2026-09-03'&&r.start.getHours()===16&&r.start.getMinutes()===30&&r.end.getHours()===18);
+      const returnCases=records.filter(r=>r.procedureAudit.returnAfterSignOutReference);
+      const augustReturn=records.filter(r=>r.dateKey==='2026-08-06'&&r.start.getHours()===16&&r.start.getMinutes()===30
+        &&r.attendanceMarkers.some(m=>m.key===ATTENDANCE_MARKER.RETURN_AFTER_SIGNOUT.key&&formatDateTime(m.returnSignIn)==='2026-08-06 16:42:10'));
+      const augustDaily=augustReturn.length?state.dailyRows.find(d=>d.dateKey==='2026-08-06'&&d.person===augustReturn[0].person):null;
+      const augustCell=augustDaily?dayCellHtml(augustDaily.date,[augustDaily]):'';
+      return {
+        sourceHours:raw.reduce((s,r)=>s+r.slice(10,15).reduce((a,v)=>a+(Number(v)||0),0),0),
+        resultHours:sum(records.map(r=>r.approvedHours)),sourceCount:rows.length,resultCount:records.flatMap(r=>r.approvals).length,
+        allAudited:records.every(r=>r.procedureAudit),
+        sourcePay:sum(rows.map(g=>{const wage=approvalView.resolveHourly(g.person,g.month,wages);return g.bandHours.reduce((s,h,i)=>s+Math.ceil((h||0)*wage*[1,1.334,1.667,2.667,1.667][i]),0);})),
+        resultPay:sum(records.map(r=>r.estimatedPay)),pending:records.filter(r=>r.payMissing).length,recordCount:records.length,
+        targetCount:target.length,
+        targetEvidence:target.map(r=>({
+          entry:r.matchedEntry&&formatDateTime(r.matchedEntry.time),exit:r.matchedExit&&formatDateTime(r.matchedExit.time),
+          risk:r.procedureAudit.risk,clock:r.procedureAudit.attendanceCorroborated,label:r.procedureAudit.label,
+          detail:r.procedureAudit.detail,calendarNotes:surgeryAudit.acceptedCalendarNotes(r),
+        })),
+        returnReferenceCount:returnCases.length,
+        returnReferenceDates:unique(returnCases.map(r=>r.dateKey)).sort(),
+        augustReturnCount:augustReturn.length,
+        allAugustReturnCount:records.filter(r=>r.dateKey==='2026-08-06'&&r.start.getHours()===16&&r.start.getMinutes()===30
+          &&r.procedureAudit.returnAfterSignOutReference).length,
+        augustReturnCases:augustReturn.map(r=>({
+          range:formatDateTime(r.start)+'-'+formatDateTime(r.end),
+          label:r.procedureAudit.label,risk:r.procedureAudit.risk,
+          evidenceCount:r.procedureAudit.evidence.length,
+          nearest:surgeryAudit.timeLabels(r,true),
+        })),
+        augustOctoberCases,
+        disconnectedReferenceCount:disconnectedReferenceCases.length,
+        disconnectedReferenceDates:unique(disconnectedReferenceCases.map(r=>r.dateKey)).sort(),
+        jan3StillMismatch:Boolean(jan3&&surgeryAudit.items(jan3).some(item=>item.label==='與加班起訖時間不符')
+          &&jan3.attendanceStatuses.includes(ATTENDANCE_STATUS.MISSING_SIGN_IN.short)
+          &&jan3.attendanceStatuses.includes(ATTENDANCE_STATUS.MISSING_SIGN_OUT.short)),
+        augustCalendarHasRedNearest:augustCell.includes('day-issue-note procedure-nearest-text'),
+        augustCalendarHasNoMatch:augustCell.includes('無對應手術時段'),
+      };
+    })()`);
     assert.equal(result.sourceHours, result.resultHours);
     assert.equal(result.sourceCount, result.resultCount);
     assert.equal(result.sourcePay, result.resultPay);
     assert.equal(result.allAudited, true);
-    console.log(JSON.stringify(result));
+    assert.equal(result.recordCount, 227);
+    assert.equal(result.targetCount, 1);
+    assert.equal(result.targetEvidence.length, 1);
+    assert.equal(result.targetEvidence[0].entry, '2026-09-03 06:22:44');
+    assert.equal(result.targetEvidence[0].exit, '2026-09-03 18:01:31');
+    assert.equal(result.targetEvidence[0].risk, false);
+    assert.equal(result.targetEvidence[0].clock, true);
+    assert.equal(result.targetEvidence[0].label, '出勤簽到退佐證');
+    assert.ok(result.targetEvidence[0].detail.includes('簽退 2026-09-03 18:01:31'));
+    assert.ok(result.targetEvidence[0].calendarNotes.includes('手術執行 2026-09-03 14:56:00-2026-09-03 17:00:00'));
+    assert.ok(result.targetEvidence[0].calendarNotes.includes('出勤簽到退佐證 06:22:44-18:01:31'));
+    assert.equal(result.returnReferenceCount, 11);
+    assert.deepEqual(result.returnReferenceDates, ['2026-02-10','2026-02-13','2026-02-25','2026-05-25','2026-06-03','2026-06-23','2026-08-06']);
+    assert.equal(result.augustReturnCount, 2);
+    assert.equal(result.allAugustReturnCount, 4);
+    assert.ok(result.augustReturnCases.every(item=>item.label==='無對應手術時段'&&item.risk&&item.evidenceCount===0));
+    assert.ok(result.augustReturnCases.every(item=>item.nearest.includes('當日最接近手術時間 2026-08-06 18:25:00-2026-08-07 04:45:00')));
+    assert.equal(result.disconnectedReferenceCount, 17);
+    assert.deepEqual(result.disconnectedReferenceDates, ['2026-01-10','2026-01-13','2026-02-04','2026-03-13','2026-03-29','2026-04-09','2026-05-18','2026-05-31','2026-07-08','2026-08-15','2026-08-22','2026-08-24','2026-08-30','2026-10-06']);
+    assert.equal(result.jan3StillMismatch, true);
+    assert.equal(result.augustOctoberCases.length, 3);
+    assert.ok(result.augustOctoberCases.every(item=>item.label==='無對應手術時段'&&item.risk&&item.evidenceCount===0));
+    assert.deepEqual(result.augustOctoberCases.filter(item=>item.date==='2026-08-30')[0].nearest, [
+      '當日最接近手術時間 2026-08-30 13:49:00-2026-08-30 14:10:00',
+      '當日最接近手術時間 2026-08-30 19:26:00-2026-08-30 20:45:00',
+    ]);
+    assert.ok(result.augustOctoberCases.filter(item=>item.date==='2026-10-06').every(item=>item.nearest.includes('當日最接近手術時間點 2026-10-06 09:12:00')));
+    assert.equal(result.augustCalendarHasRedNearest, true);
+    assert.equal(result.augustCalendarHasNoMatch, true);
+    console.log(JSON.stringify({
+      applications:result.recordCount,
+      signOutReturnPartialCases:result.returnReferenceCount,
+      returnAffectedDates:result.returnReferenceDates,
+      augustRequests:result.augustReturnCount,
+      disconnectedReferenceCount:result.disconnectedReferenceCount,
+      disconnectedReferenceDates:result.disconnectedReferenceDates,
+      correctedDateRequests:result.augustOctoberCases.length,
+    }));
   });
 }
 console.log(`${count} checks passed`);
