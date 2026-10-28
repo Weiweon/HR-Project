@@ -6,6 +6,8 @@ function renderNearestSurgeryReference(text) {
   return `<span class="procedure-nearest-label">${escapeHtml(match[1])}</span>${match[2]}${escapeHtml(match[3])}`;
 }
 
+const NO_MATCHING_SURGERY_DETAIL = "未找到與加班起訖相符之執行時段，須補其他佐證。";
+
 const surgeryAudit = {
   rows: [],
   loaded: false,
@@ -50,6 +52,7 @@ const surgeryAudit = {
         if (!caseNumbers.has(caseKey)) caseNumbers.set(caseKey, ++serial);
         parsed.push({
           caseKey, caseNumber: caseNumbers.get(caseKey), start, end,
+          patientNames: patientName ? [patientName] : [],
           procedure: cleanText(row[18]) || cleanText(row[17]), sourceSheet: sheetName, sourceRows: [header + index + 2],
         });
       });
@@ -63,6 +66,7 @@ const surgeryAudit = {
       if (prior) {
         prior.sourceRefs.push({ sheet: row.sourceSheet, row: row.sourceRows[0] });
         prior.procedures = unique([...prior.procedures, row.procedure]);
+        prior.patientNames = unique([...prior.patientNames, ...row.patientNames]);
       } else deduped.set(key, { ...row, sourceRefs: [{ sheet: row.sourceSheet, row: row.sourceRows[0] }], procedures: [row.procedure] });
     });
     return { rows: [...deduped.values()].sort((a, b) => a.start - b.start), invalid, rawCount: parsed.length };
@@ -103,15 +107,56 @@ const surgeryAudit = {
 
   candidates(record) {
     if (!record.start || !record.end) return [];
-    return this.rows.filter((row) => row.end >= addMinutes(record.start, -TOLERANCE_MINUTES) && row.start <= addMinutes(record.end, TOLERANCE_MINUTES));
+    const rows = this.rowsForRecord(record).rows;
+    return rows.filter((row) => row.end >= addMinutes(record.start, -TOLERANCE_MINUTES) && row.start <= addMinutes(record.end, TOLERANCE_MINUTES));
   },
 
-  nearestSameDay(record) {
+  normalizePatientName(value) {
+    return cleanText(value).normalize("NFKC").replace(/\s/g, "");
+  },
+
+  matchedPatientNames(record) {
+    const reason = this.normalizePatientName(record.reason);
+    if (!reason) return [];
+    const candidates = unique(this.rows.flatMap((row) => row.patientNames || [])
+      .map((name) => this.normalizePatientName(name))
+      .filter((name) => name.length >= 2 && reason.includes(name)))
+      .sort((a, b) => b.length - a.length);
+    const matches = [];
+    candidates.forEach((name) => {
+      if (!matches.some((matched) => matched.includes(name) || name.includes(matched))) matches.push(name);
+    });
+    return matches;
+  },
+
+  rowsForRecord(record) {
+    const matchedPatientNames = this.matchedPatientNames(record);
+    if (!matchedPatientNames.length) return { rows: this.rows, matchedPatientCount: 0 };
+    return {
+      rows: this.rows.filter((row) => (row.patientNames || []).some((name) => matchedPatientNames.includes(this.normalizePatientName(name)))),
+      matchedPatientCount: matchedPatientNames.length,
+    };
+  },
+
+  nearestWithinRequestDates(record) {
     if (!record.start || !record.end) return [];
     const dayStart = new Date(record.start.getFullYear(), record.start.getMonth(), record.start.getDate());
-    const dayEnd = new Date(dayStart.getFullYear(), dayStart.getMonth(), dayStart.getDate() + 1);
-    const rows = this.rows.filter((row) => row.start < dayEnd && (row.end > dayStart || row.start >= dayStart));
+    const lastDay = new Date(record.end.getFullYear(), record.end.getMonth(), record.end.getDate());
+    const dayEnd = new Date(lastDay.getFullYear(), lastDay.getMonth(), lastDay.getDate() + 1);
+    const candidateRows = this.rowsForRecord(record).rows;
+    const rows = candidateRows.filter((row) => row.start < dayEnd && (row.end > dayStart || row.start >= dayStart));
     const gap = (row) => Math.max(row.start - record.end, record.start - row.end, 0);
+    const nearest = Math.min(...rows.map(gap));
+    return rows.filter((row) => gap(row) === nearest);
+  },
+
+  nearestToRequestStart(record) {
+    if (!record.start || !record.end) return [];
+    const dayStart = new Date(record.start.getFullYear(), record.start.getMonth(), record.start.getDate());
+    const lastDay = new Date(record.end.getFullYear(), record.end.getMonth(), record.end.getDate());
+    const dayEnd = new Date(lastDay.getFullYear(), lastDay.getMonth(), lastDay.getDate() + 1);
+    const rows = this.rowsForRecord(record).rows.filter((row) => row.start < dayEnd && (row.end > dayStart || row.start >= dayStart));
+    const gap = (row) => Math.max(row.start - record.start, record.start - row.end, 0);
     const nearest = Math.min(...rows.map(gap));
     return rows.filter((row) => gap(row) === nearest);
   },
@@ -145,19 +190,32 @@ const surgeryAudit = {
 
   evaluate(record) {
     if (!this.loaded) return null;
-    const base = { evidence: [], nearbyEvidence: [], risk: false, pending: true, mode: "T／U 執行時段比對" };
+    const patientMatch = this.rowsForRecord(record);
+    const base = {
+      evidence: [], nearbyEvidence: [], risk: false, pending: true, mode: "T／U 執行時段比對",
+      patientNameMatched: patientMatch.matchedPatientCount > 0,
+      matchedPatientCount: patientMatch.matchedPatientCount,
+    };
     if (!record.start || !record.end) return { ...base, label: "手術起訖待覆核", detail: "加班單缺少有效起訖，無法比對。" };
     const evidence = this.candidates(record);
     const first = this.rows[0]?.start;
     const last = latestTime(this.rows.map((row) => row.end));
     if (!evidence.length) {
       // Nearby times are references only; they must not contribute to coverage or clear a risk.
-      const nearbyEvidence = this.nearestSameDay(record);
+      const nearbyEvidence = this.nearestWithinRequestDates(record);
       if (record.end < first || record.start > last) return { ...base, nearbyEvidence, label: "超出手術資料期間", detail: "申請區間不在本次手術資料期間內，尚無法覆核。" };
-      return { ...base, nearbyEvidence, risk: true, label: "無對應手術時段", detail: "未找到與加班起訖相符之執行時段，須補其他佐證。" };
+      return { ...base, nearbyEvidence, risk: true, label: "無對應手術時段", detail: NO_MATCHING_SURGERY_DETAIL };
     }
     const intervals = evidence.filter((row) => row.end > row.start).sort((a, b) => a.start - b.start);
-    if (!intervals.length) return { ...base, evidence, label: "手術僅時間點", detail: "T／U 時間相同，僅能佐證執行時間點，無法證明整段加班。" };
+    if (!intervals.length) {
+      const nearest = this.nearestToRequestStart(record);
+      const nearbyEvidence = nearest.filter((row) => !evidence.some((candidate) => +candidate.start === +row.start && +candidate.end === +row.end));
+      return {
+        ...base, evidence, nearbyEvidence,
+        label: "手術僅時間點",
+        detail: "T／U 時間相同，僅能佐證執行時間點，無法證明整段加班。",
+      };
+    }
     const tolerance = TOLERANCE_MINUTES * 60000;
     const merged = [];
     intervals.forEach((row) => {
@@ -186,7 +244,7 @@ const surgeryAudit = {
     const disconnectedAttendanceReference = !returnedAfterSignOut && interrupted
       && Boolean(record.matchedEntry && record.matchedExit);
     if ((returnedAfterSignOut || disconnectedAttendanceReference) && overlapHours > 0 && !covered) {
-      const nearestEvidence = this.nearestSameDay(record);
+      const nearestEvidence = this.nearestWithinRequestDates(record);
       return {
         ...base,
         evidence: [],
@@ -197,9 +255,7 @@ const surgeryAudit = {
         returnAfterSignOutReference: returnedAfterSignOut,
         disconnectedAttendanceReference,
         label: "無對應手術時段",
-        detail: returnedAfterSignOut
-          ? "本筆有簽退後返回加班紀錄，但手術時段未完整涵蓋加班申請起訖，故不列為本筆對應手術佐證；當日最接近手術時間僅供參考，工作內容仍須依其他紀錄覆核。"
-          : "手術起始或中段與加班申請之間有超過 10 分鐘的佐證缺口，且另有簽到退紀錄可供核對；手術不列為本筆連續對應佐證，當日最接近手術時間僅供參考，仍須依其他紀錄覆核。",
+        detail: NO_MATCHING_SURGERY_DETAIL,
       };
     }
     const attendance = this.attendanceCorroboration(record);
@@ -225,6 +281,10 @@ const surgeryAudit = {
           ? `手術連續佐證至 ${formatDateTime(new Date(coveredUntil))}；加班申請至 ${formatDateTime(record.end)}，相差 ${formatNumber(endGapMinutes, 2)} 分鐘，但缺少可涵蓋申請起訖的有效簽到退佐證；不單憑手術結束時間推定術後整理，須補其他佐證。`
           : covered ? `T／U 時段 ${spans}${exact ? "，起訖差異在 10 分鐘內。" : "，涵蓋申請；非起訖完全相同。"}執行人員仍需依其他佐證確認。`
             : `T／U 時段 ${spans}，重疊 ${formatNumber(overlapHours, 2)} h；其餘申請區間需補其他工作或術前術後作業佐證。`;
+    const label = postoperativeAssumed ? "術後整理推定"
+      : clockSupportedTail ? "出勤簽到退佐證"
+        : covered ? exact ? "手術起訖相符" : "手術時段涵蓋"
+          : overlapHours > 0 ? "手術部分重疊" : "無對應手術時段";
     return {
       ...base, evidence, pending: !supported, risk: !supported, overlapHours,
       postoperativeAssumed,
@@ -238,11 +298,8 @@ const surgeryAudit = {
       postoperativeNeedsAttendance,
       attendanceEntry: attendanceCorroborated ? attendance.entry : null,
       attendanceExit: attendanceCorroborated ? attendance.exit : null,
-      label: postoperativeAssumed ? "術後整理推定"
-        : clockSupportedTail ? "出勤簽到退佐證"
-          : covered ? exact ? "手術起訖相符" : "手術時段涵蓋"
-            : overlapHours > 0 ? "手術部分重疊" : "無對應手術時段",
-      detail,
+      label,
+      detail: label === "無對應手術時段" ? NO_MATCHING_SURGERY_DETAIL : detail,
     };
   },
 
@@ -277,11 +334,14 @@ const surgeryAudit = {
     const format = (time) => fullDate ? formatDateTime(time) : formatCalendarTime(time, record.date);
     const result = record.procedureAudit;
     const matched = result?.evidence || [];
-    const rows = matched.length ? matched : result?.nearbyEvidence || [];
-    const prefix = matched.length ? "手術執行" : "當日最接近手術";
-    return unique(rows.map((row) => +row.start === +row.end
+    const nearby = result?.nearbyEvidence || [];
+    const labels = (rows, prefix, includeRangeWord) => rows.map((row) => +row.start === +row.end
       ? `${prefix}時間點 ${format(row.start)}`
-      : `${matched.length ? prefix : `${prefix}時間`} ${format(row.start)}-${format(row.end)}`));
+      : `${prefix}${includeRangeWord ? "時間" : ""} ${format(row.start)}-${format(row.end)}`);
+    return unique([
+      ...labels(nearby, "當日最接近手術", true),
+      ...labels(matched, "手術執行", false),
+    ]);
   },
 
   renderTimeList(times) {
@@ -305,7 +365,7 @@ const surgeryAudit = {
     if (!result) return "";
     const times = this.timeLabels(record, true);
     return `<section class="record-mini-section procedure-detail"><h4>手術／ECMO 佐證</h4>${this.items(record).map((item) => statusBadgeHtml(item.label, `attendance ${item.tone}`)).join("")}
-      ${!result.evidence.length || result.postoperativeAssumed || result.attendanceCorroborated || result.attendanceRequired ? `<p>${escapeHtml(result.detail)}</p>` : ""}
+      ${result.label === "無對應手術時段" || !result.evidence.length || result.postoperativeAssumed || result.attendanceCorroborated || result.attendanceRequired ? `<p>${escapeHtml(result.detail)}</p>` : ""}
       ${this.renderTimeList(times)}</section>`;
   },
 
@@ -313,7 +373,7 @@ const surgeryAudit = {
     const result = record.procedureAudit;
     if (!result) return "";
     const reference = (row) => `${formatDateTime(row.start)}～${formatDateTime(row.end)} ${row.sourceRefs.map((ref) => `${ref.sheet}第${ref.row}列`).join("、")}`;
-    return [result.mode, result.detail, ...result.evidence.map(reference),
+    return [result.patientNameMatched ? "依加班事由中的病患姓名篩選手術佐證（姓名關聯僅供案件定位）" : "", result.mode, result.detail, ...result.evidence.map(reference),
       ...(result.nearbyEvidence || []).map((row) => `當日最接近（非本筆對應佐證）：${reference(row)}`)].join("；");
   },
 };

@@ -675,7 +675,7 @@ function recordFromApplication(app, scheduleByKey, wageMap, attendanceIndex) {
   const personEvents = attendanceIndex.get(app.person) || [];
   const attendance = evaluateAttendanceRecord(app, personEvents);
   const attendanceMarkers = [
-    ...detectReturnAfterSignOut(app, schedule),
+    ...detectReturnAfterSignOut(app, schedule, scheduleByKey, attendance.entry, personEvents),
     ...detectProxyCard(app, schedule, personEvents),
   ];
   const audit = auditTextToCategories(app.audit);
@@ -765,38 +765,67 @@ function recordFromSchedule(row, wageMap) {
   return record;
 }
 
-function detectReturnAfterSignOut(app, schedule) {
-  if (!app?.start || !schedule?.signOut) return [];
+function detectReturnAfterSignOut(app, schedule, scheduleByKey, matchedEntry, personEvents) {
+  if (!app?.start || !app?.end) return [];
 
-  const candidateEvents = [
-    ...((schedule.otherSignIns || []).map((time) => ({ time, sourceLabel: "排班其他簽到" }))),
-    ...((app.signIns || []).map((time) => ({ time, sourceLabel: "加班單簽到" }))),
-  ]
-    .filter((event) => event.time > schedule.signOut)
-    .sort((left, right) => left.time - right.time);
+  const currentDateReturn = schedule?.signOut
+    ? [
+        ...((schedule.otherSignIns || []).map((time) => ({ time, sourceLabel: "排班其他簽到" }))),
+        ...((app.signIns || []).map((time) => ({ time, sourceLabel: "加班單簽到" }))),
+      ]
+        .filter((event) => event.time > schedule.signOut && event.time <= addMinutes(app.end, TOLERANCE_MINUTES))
+        .sort((left, right) => left.time - right.time)
+        .find((event) => event.time <= new Date(Math.max(
+          addMinutes(schedule.signOut, 30).getTime(),
+          addMinutes(app.start, TOLERANCE_MINUTES).getTime(),
+        )))
+    : null;
 
-  const threshold = new Date(Math.max(addMinutes(schedule.signOut, 30).getTime(), addMinutes(app.start, TOLERANCE_MINUTES).getTime()));
-  const returnSignIn = candidateEvents.find((event) => event.time <= threshold);
+  let returnSignIn = null;
+  let originalSignOut = null;
+  let overtimeStartsNearScheduledEnd = false;
+
+  if (app.start.getHours() < 8 && matchedEntry?.time < app.start) {
+    const priorDate = addDays(new Date(app.start.getFullYear(), app.start.getMonth(), app.start.getDate()), -1);
+    const priorSchedule = scheduleByKey.get(dailyKey(app.person, formatDateKey(priorDate)));
+    const matchedEvent = (personEvents || []).find((event) => (
+      event.direction === "entry"
+      && ["schedule", "application"].includes(event.sourceGroup)
+      && +event.time === +matchedEntry.time
+    ));
+    if (priorSchedule?.signOut && matchedEvent
+      && matchedEvent.time > priorSchedule.signOut
+      && matchedEvent.time <= addMinutes(priorSchedule.signOut, 30)) {
+      returnSignIn = matchedEvent;
+      originalSignOut = priorSchedule.signOut;
+    }
+  }
+
+  if (!returnSignIn && currentDateReturn) {
+    returnSignIn = currentDateReturn;
+    originalSignOut = schedule.signOut;
+    const scheduledEnd = schedule.expectedOut;
+    overtimeStartsNearScheduledEnd = Boolean(
+      scheduledEnd
+      && Math.abs(app.start.getTime() - scheduledEnd.getTime()) <= 30 * 60000
+      && currentDateReturn.time >= addMinutes(app.start, -TOLERANCE_MINUTES)
+      && currentDateReturn.time <= addMinutes(app.end, TOLERANCE_MINUTES),
+    );
+  }
+
   if (!returnSignIn) return [];
-  const scheduledEnd = schedule.expectedOut;
-  const overtimeStartsNearScheduledEnd = Boolean(
-    app.end
-    && scheduledEnd
-    && Math.abs(app.start.getTime() - scheduledEnd.getTime()) <= 30 * 60000
-    && returnSignIn.time >= addMinutes(app.start, -TOLERANCE_MINUTES)
-    && returnSignIn.time <= addMinutes(app.end, TOLERANCE_MINUTES),
-  );
 
   return [{
     key: ATTENDANCE_MARKER.RETURN_AFTER_SIGNOUT.key,
     label: ATTENDANCE_MARKER.RETURN_AFTER_SIGNOUT.label,
-    originalSignOut: schedule.signOut,
+    originalSignOut,
     returnSignIn: returnSignIn.time,
     overtimeStartsNearScheduledEnd,
+    crossDateCarryover: returnSignIn.time < app.start,
     sourceLabel: returnSignIn.sourceLabel,
     countsAsRisk: false,
-    note: `簽退 ${formatTimeWithSeconds(schedule.signOut)}，返回 ${formatTimeWithSeconds(returnSignIn.time)}`,
-    detail: `${ATTENDANCE_MARKER.RETURN_AFTER_SIGNOUT.label}：原簽退 ${formatDateTime(schedule.signOut)}，新簽到 ${formatDateTime(returnSignIn.time)}${returnSignIn.sourceLabel ? `（${returnSignIn.sourceLabel}）` : ""}`,
+    note: `簽退 ${formatTimeWithSeconds(originalSignOut)}，返回 ${formatTimeWithSeconds(returnSignIn.time)}`,
+    detail: `${ATTENDANCE_MARKER.RETURN_AFTER_SIGNOUT.label}：原簽退 ${formatDateTime(originalSignOut)}，新簽到 ${formatDateTime(returnSignIn.time)}${returnSignIn.sourceLabel ? `（${returnSignIn.sourceLabel}）` : ""}`,
   }];
 }
 
